@@ -1,0 +1,18 @@
+# 基于 Google 风格，但放宽了列数限制和缩进
+BasedOnStyle: Google
+Language: Cpp
+Standard: c++17
+IndentWidth: 4
+ColumnLimit: 120
+
+# 指针/引用靠近变量名 (例如: int *a 变为 int* a)
+PointerAlignment: Left
+
+# 允许短函数写在一行 (例如: int get() { return 1; })
+AllowShortFunctionsOnASingleLine: Inline
+
+# namespace 内部不缩进 (避免过度缩进)
+NamespaceIndentation: None
+
+# 保持 include 块的有序排列
+SortIncludes: true

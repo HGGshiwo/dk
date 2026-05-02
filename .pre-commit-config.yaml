@@ -1,0 +1,19 @@
+repos:
+  # === Python 格式化钩子 ===
+  - repo: https://github.com/psf/black
+    rev: 24.2.0  # 强制指定版本号，不要用 master
+    hooks:
+      - id: black
+      
+  - repo: https://github.com/PyCQA/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+      
+  # === C/C++ 格式化钩子 ===
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v18.1.5 # 推荐使用较高版本的 clang-format，能更好地支持 C++17/20 语法
+    hooks:
+      - id: clang-format
+        # 显式指定要格式化的文件后缀
+        types: [c++, file, text, non-executable]
