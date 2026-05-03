@@ -1,8 +1,7 @@
 #pragma once
 // #include <algorithm>
 #include <atomic>
-#include <boost/asio/post.hpp>
-#include <boost/asio/thread_pool.hpp>
+#include <boost/asio.hpp>
 #include <chrono>
 #include <condition_variable>
 #include <functional>
@@ -20,6 +19,8 @@
 #include <variant>
 #include <vector>
 
+#include "./future.hpp"
+
 // ================= dk 框架核心 =================
 namespace dk {
 
@@ -30,12 +31,38 @@ template <typename T, typename E, typename C>
 struct has_on_event<T, E, C, std::void_t<decltype(std::declval<T>().on_event(std::declval<E>(), std::declval<C>()))>>
     : std::true_type {};
 
+// 引入类型萃取黑魔法：用于自动推导 Lambda 的参数类型
+template <typename T>
+struct lambda_traits : public lambda_traits<decltype(&T::operator())> {};
+template <typename ClassType, typename ReturnType, typename ArgType>
+struct lambda_traits<ReturnType (ClassType::*)(ArgType) const> {
+    using arg_type = std::decay_t<ArgType>;  // 提取出具体的事件类型
+};
+
 // 提供给State的抽象接口
 template <typename Event, typename Context>
 class IEngine {
    public:
-    // 投递后台工作流
-    virtual void run_workflow(std::function<std::optional<Event>()> workflow) = 0;
+    // 临时注册事件回调，直到满足条件或者超时，EventType是具体的事件类型
+    // 底层虚函数：接收总的 Variant 事件进行判断
+    virtual Future<bool> wait_internal(std::function<bool(const Event&)> predicate, double timeout = 5000) = 0;
+    // ================= 用户层魔法 API =================
+    // 用户只需要写： engine->wait([](const SpecificEvent& e) { return e.id == 1; });
+    template <typename F>
+    Future<bool> wait(F&& predicate, double timeout = 5000) {
+        // 1. 自动推导用户 Lambda 接收的是哪个具体的事件类型（比如 TickEvent）
+        using SpecificEvent = typename lambda_traits<std::decay_t<F>>::arg_type;
+        // 2. 包装用户的 predicate，抹平多态差异
+        auto wrapper = [pred = std::forward<F>(predicate)](const Event& variant_event) -> bool {
+            // 3. 核心：如果来的事件根本就不是我们等的那种事件，直接忽略！
+            if (const auto* specific_event = std::get_if<SpecificEvent>(&variant_event)) {
+                return pred(*specific_event);  // 类型匹配，执行业务判断
+            }
+            return false;  // 类型不匹配，当做条件不成立，继续在队列里等下一个事件
+        };
+        // 4. 将包装后的方法注册到底层
+        return wait_internal(wrapper, timeout);
+    }
 
     // 派发内部高优事件（微队列）
     virtual void dispatch_internal(Event e) = 0;
@@ -55,39 +82,6 @@ struct EnterEvent {
 };  // 携带状态名，方便全局拦截打印
 struct ExitEvent {
     const std::string state_name;
-};
-
-template <typename ResultT>
-class Promise {
-    std::promise<ResultT> promise_;
-    bool is_resolved_{false};
-
-   public:
-    Promise() = default;
-    // 禁用拷贝
-    Promise(const Promise&) = delete;
-    Promise& operator=(const Promise&) = delete;
-    ~Promise() {
-        // 【核心逻辑】：如果对象析构时还没有被 resolve，自动抛出特定异常
-        if (!is_resolved_) {
-            promise_.set_exception(
-                std::make_exception_ptr(std::runtime_error("AsyncEvent was discarded by State Machine (Unhandled).")));
-        }
-    }
-    std::future<ResultT> get_future() { return promise_.get_future(); }
-
-    void resolve(ResultT val) {
-        if (!is_resolved_) {
-            promise_.set_value(std::move(val));
-            is_resolved_ = true;
-        }
-    }
-    void reject(const std::exception_ptr& eptr) {
-        if (!is_resolved_) {
-            promise_.set_exception(eptr);
-            is_resolved_ = true;
-        }
-    }
 };
 
 // 异步事件
@@ -217,30 +211,38 @@ class PureState : public BaseState<Event, Context, DerivedChild> {
 };
 
 // 引入 CRTP 允许外部重写 Engine 的 on_event
-template <typename Event, typename DerivedEngine, typename Context>
-class BaseEngine : public std::enable_shared_from_this<BaseEngine<Event, DerivedEngine, Context>>,
-                   public IEventHandler<IEngine<Event, Context>, Event, Context, void, DerivedEngine> {
+template <typename Event, typename Context, typename DerivedEngine>
+class BaseEngine : public std::enable_shared_from_this<BaseEngine<Event, Context, DerivedEngine>>,
+                   public IEventHandler<IEngine<Event, Context>, Event, Context, void, DerivedEngine>,
+                   public IAsyncRuntime {
     using StateType = IState<Event, Context>;
     using EventListenerPtr = std::shared_ptr<IEventListener<Event, Context>>;
 
-    std::shared_ptr<StateType> state_;
+    std::shared_ptr<StateType> state_;  // 当前的状态
     Context ctx_;
 
-    std::mutex mtx_;
-    std::queue<Event> external_queue_;
-    std::queue<Event> internal_queue_;
-
-    std::condition_variable cv_;
     std::atomic<bool> running_{false};
-    std::thread worker_thread_;
-
-    std::mutex timer_mtx_;
-    std::condition_variable timer_cv_;
-    std::thread timer_thread_;
-
-    std::unique_ptr<boost::asio::thread_pool> workflow_pool_;
-
     std::vector<EventListenerPtr> listeners_;  // 和状态无关的监听器
+
+    // 引入 Asio 的绝对核心：I/O 上下文
+    boost::asio::io_context io_context_;
+    std::optional<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>> work_guard_;
+    std::optional<boost::asio::steady_timer> tick_timer_;
+    std::chrono::milliseconds tick_interval_;
+    std::thread worker_thread_;  // 只需要这一个线程跑 io_context
+
+    std::optional<std::unique_ptr<boost::asio::thread_pool>> workflow_pool_;
+    std::thread::id event_thread_id_;  // 事件循环的thread id, 用于检测wait
+
+    struct WaitNode {
+        uint64_t id;
+        std::function<bool(const Event&)> predicate;
+        std::shared_ptr<Promise<bool>> promise;
+        std::shared_ptr<boost::asio::steady_timer> timer;
+    };
+    // 保存所有正在等待的请求。使用 map 是为了 O(1) 的删除效率
+    std::unordered_map<uint64_t, std::shared_ptr<WaitNode>> active_waits_;
+    uint64_t next_wait_id_ = 0;
 
    public:
     virtual ~BaseEngine() { stop(); }
@@ -248,105 +250,144 @@ class BaseEngine : public std::enable_shared_from_this<BaseEngine<Event, Derived
 
     void add_listener(EventListenerPtr listener) { listeners_.push_back(listener); }
 
+    std::thread::id get_thread_id() override { return event_thread_id_; }
+
+    // 实现promise runtime
+    void post_future_task(std::function<void()> task) { boost::asio::post(io_context_, std::move(task)); }
+
+    // 实现promise runtime
+    std::function<void()> set_future_timeout(uint32_t ms, std::function<void()> on_timeout) {
+        auto timer = std::make_shared<boost::asio::steady_timer>(io_context_);
+        timer->expires_after(std::chrono::milliseconds(ms));
+
+        timer->async_wait([on_timeout](const boost::system::error_code& ec) {
+            if (!ec) on_timeout();
+        });
+        // 返回取消句柄
+        return [timer]() { timer->cancel(); };
+    }
+
     // 线程安全的外部事件注入接口
     void dispatch(Event e) {
-        std::lock_guard<std::mutex> lock(mtx_);
-        external_queue_.push(std::move(e));
-        cv_.notify_one();
+        boost::asio::post(io_context_, [this, e = std::move(e)]() mutable { this->process_internal(e); });
+    }
+
+    // 提交一个后台任务，在线程池而不是事件循环中进行
+    template <typename ReturnType>
+    Future<ReturnType> post_background_task(std::function<ReturnType()> task) {
+        std::shared_ptr<Promise<ReturnType>> promise = std::make_shared<Promise<ReturnType>>(this);
+        boost::asio::post(this->workflow_pool_.value(), [task, engine = this, promise]() {
+            // --- 此时运行在【后台计算线程】，你可以随便算几秒，绝对不卡主线程 ---
+            ReturnType data = task();
+            // --- 算完啦！重点来了：必须安全地把结果送回主线程！ ---
+            // 绝对不能在这里直接调 e.resolve() 或者修改 ctx，因为会破坏单线程无锁设计！
+            // 利用引擎的主 io_context，把完成的事件 post 回去
+            boost::asio::post(engine->io_context_, [data, promise]() {
+                // --- 此时又回到了【主事件循环线程】！ ---
+                // 极其安全地完成 Promise
+                promise->resolve(data);
+            });
+        });
+        return promise->get_futrue();
     }
 
     // 2. 异步派发：【在塞入队列前，给 Event 注入 Promise！】
     template <typename E>
-    std::future<typename E::ReturnType> dispatch_async(E e) {
+    Future<typename E::ReturnType> dispatch_async(E e, uint32_t timeout_ms = 5000) {
         static_assert(std::is_base_of_v<AsyncEvent<typename E::ReturnType>, E>,
                       "Event must inherit from dk::AsyncEvent to use dispatch_async!");
         using R = typename E::ReturnType;
-        auto promise = std::make_shared<Promise<R>>();
-        auto future = promise->get_future();
+        auto promise = std::make_shared<Promise<R>>(this);
+        Future<R> future = promise->get_future();
 
         // 【关键注入】：赋予这个普通事件以异步返回的超能力
         e.promise_ = promise;
+        if (timeout_ms > 0) {
+            future = future.timeout(timeout_ms);
+        }
+        boost::asio::post(io_context_, [this, e = std::move(e)]() mutable { this->process_internal(e); });
 
-        std::lock_guard<std::mutex> lock(mtx_);
-        // 直接存入原生 Event，告别 EnvelopedEvent！
-        external_queue_.push(Event{std::move(e)});
-        cv_.notify_one();
+        return future;
+    }
 
+    Future<bool> wait_internal(std::function<bool(const Event&)> predicate, double timeout = 5000) override {
+        auto promise = std::make_shared<Promise<bool>>(this);
+        Future<bool> future = promise->get_future();
+        // 将注册动作投入无锁的主循环
+        boost::asio::post(io_context_, [this, predicate = std::move(predicate), promise, timeout]() {
+            uint64_t id = ++next_wait_id_;
+            auto node = std::make_shared<WaitNode>();
+            node->id = id;
+            node->predicate = std::move(predicate);
+            node->promise = promise;
+
+            node->timer = std::make_shared<boost::asio::steady_timer>(io_context_);
+            node->timer->expires_after(std::chrono::milliseconds(static_cast<long long>(timeout)));
+
+            node->timer->async_wait([this, id](const boost::system::error_code& ec) {
+                if (ec == boost::asio::error::operation_aborted) return;
+
+                auto it = active_waits_.find(id);
+                if (it != active_waits_.end()) {
+                    auto p = it->second->promise;
+                    active_waits_.erase(it);
+                    p->resolve(false);  // 超时未等到
+                }
+            });
+            active_waits_[id] = node;
+        });
         return future;
     }
 
     void start(std::shared_ptr<IState<Event, Context>> initial_state, std::chrono::milliseconds tick_interval) {
         if (running_) return;
-        ctx_.engine = this;
-        workflow_pool_ = std::make_unique<boost::asio::thread_pool>(4);
 
+        ctx_.engine = this;
+
+        work_guard_.emplace(boost::asio::make_work_guard(io_context_));
+        tick_timer_.emplace(io_context_);
+
+        tick_interval_ = tick_interval;
+        schedule_next_tick();
+
+        workflow_pool_.emplace(std::make_unique<boost::asio::thread_pool>(4));
         transition(initial_state);
         running_ = true;
-        // 1. 启动【工作线程】
-        worker_thread_ = std::thread(&BaseEngine::run_loop, this);
-        // 2. 启动【定时器线程】
-        timer_thread_ = std::thread([this, tick_interval]() {
-            while (running_) {
-                std::unique_lock<std::mutex> lock(timer_mtx_);
-                // wait_for 的魔法：
-                // 如果休眠期间被 notify 唤醒，且 running_ 变为 false，它会立刻返回 true（中断睡眠）。
-                // 如果睡满了 tick_interval 都没人叫它，它会返回 false（正常超时）。
-                bool stopped = timer_cv_.wait_for(lock, tick_interval, [this]() { return !running_; });
 
-                // 只有正常超时醒来，且引擎还在运行，才发送 Tick
-                if (!stopped && running_) {
-                    this->dispatch_internal(Event{dk::TickEvent{}});
-                }
+        worker_thread_ = std::thread([this]() {
+            try {
+                io_context_.run();
+            } catch (const std::exception& e) {
+                std::cerr << "io_context thread crashed: " << e.what() << std::endl;
             }
         });
+        event_thread_id_ = worker_thread_.get_id();
     }
 
     void stop() {
-        if (!running_) {
-            return;
-        }
-        {
-            std::lock_guard<std::mutex> lock(timer_mtx_);
-            running_ = false;
-            timer_cv_.notify_all();
-        }
-        {
-            std::lock_guard<std::mutex> lock(mtx_);
-            cv_.notify_all();
-        }
+        if (!running_) return;
 
-        if (timer_thread_.joinable()) timer_thread_.join();
-        // 判断是否是当前线程
-        if (worker_thread_.joinable() && std::this_thread::get_id() != worker_thread_.get_id()) {
-            worker_thread_.join();
-        } else {
-            worker_thread_.detach();  // 如果是自身调用，只能 detach 交给系统回收
-        }
-        workflow_pool_->stop();
-        workflow_pool_->join();
-    }
+        work_guard_.reset();  // 允许 io_context 退出
+        io_context_.stop();   // 立刻停止
 
-    void run_workflow(std::function<std::optional<Event>()> workflow) override {
-        if (!workflow_pool_) {
-            // 可以打印一个日志，没有调用start
-            return;
-        }
-        std::weak_ptr<BaseEngine> weak_this = this->weak_from_this();
-
-        boost::asio::post(*workflow_pool_, [weak_this, workflow]() {
-            auto result_event = workflow();
-            if (result_event.has_value()) {
-                if (auto shared_this = weak_this.lock()) {
-                    shared_this->dispatch_internal(std::move(result_event.value()));
-                }
+        if (worker_thread_.joinable()) {
+            // 判断是否是当前线程
+            if (std::this_thread::get_id() != worker_thread_.get_id()) {
+                worker_thread_.join();
+            } else {
+                throw std::logic_error("FATAL: Cannot destroy runtime from its own worker thread!");
             }
-        });
+        }
+
+        if (workflow_pool_.has_value()) {
+            workflow_pool_.value()->stop();
+            workflow_pool_.value()->join();
+        }
     }
 
     void dispatch_internal(Event e) override {
-        std::lock_guard<std::mutex> lock(mtx_);
-        internal_queue_.push(std::move(e));
-        cv_.notify_one();
+        // asio::defer 告诉 Asio：这是一个后续任务，请优先在当前调用栈结束后执行！
+        boost::asio::defer(io_context_, [this, e = std::move(e)]() mutable { this->process_internal(e); });
     }
 
    private:
@@ -371,6 +412,21 @@ class BaseEngine : public std::enable_shared_from_this<BaseEngine<Event, Derived
 
     // 处理核心业务事件
     void process_internal(const Event& e) {
+        // 遍历所有等待者，让它们判断当前事件是否符合条件
+        // 注意：使用 C++11 的 erase 方式，防止迭代器失效
+        for (auto it = active_waits_.begin(); it != active_waits_.end();) {
+            // 传入 e 进行嗅探
+            if (it->second->predicate(e)) {
+                // 条件满足！
+                it->second->timer->cancel();         // 取消超时定时器
+                it->second->promise->resolve(true);  // 成功触发，返回 true
+                it = active_waits_.erase(it);        // 从队列中移除（不需要再次排队了）
+            } else {
+                // 如果返回 false，什么都不做，迭代器前进（继续在队列中排队）
+                ++it;
+            }
+        }
+
         for (auto& listener : listeners_) {
             listener->handle_event(e, ctx_);
         }
@@ -383,44 +439,17 @@ class BaseEngine : public std::enable_shared_from_this<BaseEngine<Event, Derived
         }
     }
 
-    void run_loop() {  // 👈 注意：再也不需要传入 tick_interval 了
-        while (running_) {
-            // ==========================================
-            // 阶段 A：绝对排干内部微队列（最高优先级）
-            // ==========================================
-            while (true) {
-                std::queue<Event> local_internal;
-                {
-                    std::lock_guard<std::mutex> lock(mtx_);
-                    if (internal_queue_.empty()) break;
-                    std::swap(local_internal, internal_queue_);
-                }
-                while (!local_internal.empty()) {
-                    process_internal(std::move(local_internal.front()));
-                    local_internal.pop();
-                }
+    void schedule_next_tick() {
+        if (!running_) return;
+        tick_timer_.value().expires_after(tick_interval_);
+        tick_timer_.value().async_wait([this](const boost::system::error_code& ec) {
+            if (!ec && running_) {
+                // 触发 Tick 业务
+                this->process_internal(Event{dk::TickEvent{}});
+                // 循环排队下一次
+                this->schedule_next_tick();
             }
-            // ==========================================
-            // 阶段 B：只取 1 个外部宏任务
-            // ==========================================
-            std::optional<Event> macro_event;
-            {
-                std::unique_lock<std::mutex> lock(mtx_);
-                cv_.wait(lock, [this]() { return !external_queue_.empty() || !internal_queue_.empty() || !running_; });
-
-                if (!running_) break;
-                if (!internal_queue_.empty()) {
-                    continue;  // 🚨 防线：定时器刚好塞入了 Tick，立马滚回去排干微队列！
-                }
-                if (!external_queue_.empty()) {
-                    macro_event.emplace(std::move(external_queue_.front()));
-                    external_queue_.pop();
-                }
-            }
-            if (macro_event.has_value()) {
-                process_internal(std::move(macro_event.value()));
-            }
-        }
+        });
     }
 };
 

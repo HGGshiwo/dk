@@ -24,7 +24,7 @@ struct TestContext : dk::BaseContext<TestEvent, TestContext> {
 
 // ================== 2. 测试引擎与状态定义 ==================
 
-class TestEngine : public dk::BaseEngine<TestEvent, TestEngine, TestContext> {
+class TestEngine : public dk::BaseEngine<TestEvent, TestContext, TestEngine> {
    public:
     // 测试全局 Hook：记录进出状态
     void on_event(const dk::EnterEvent& e, TestContext& ctx) {
@@ -141,12 +141,12 @@ TEST_F(DkFrameworkTest, MicroQueuePriority) {
 // 测试 3：异步事件正常返回 (Promise/Future)
 TEST_F(DkFrameworkTest, AsyncEventResolve) {
     // 发送异步事件
-    std::future<int> fut = engine->dispatch_async(EvAsyncQuery{});
+    dk::Future<int> fut = engine->dispatch_async(EvAsyncQuery{});
 
     // 阻塞等待状态机处理并 resolve
     // 设置超时防止死锁（500ms 内必须返回）
-    auto status = fut.wait_for(std::chrono::milliseconds(500));
-    ASSERT_EQ(status, std::future_status::ready) << "Future timed out!";
+    auto status = fut.wait_for(500);
+    ASSERT_EQ(status, dk::FutureState::FULFILLED) << "Future timed out!";
 
     int result = fut.get();
     EXPECT_EQ(result, 42);  // StateA 中写死了 resolve(42)
@@ -159,7 +159,7 @@ TEST_F(DkFrameworkTest, AsyncEventUnhandledRejection) {
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
     // 在 StateB 状态下发送异步请求
-    std::future<int> fut = engine->dispatch_async(EvAsyncQuery{});
+    dk::Future<int> fut = engine->dispatch_async(EvAsyncQuery{});
 
     // 状态机无法处理，Event 对象被析构，应该自动 Reject 抛出 runtime_error
     EXPECT_THROW({ fut.get(); }, std::runtime_error);
