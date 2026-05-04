@@ -5,6 +5,7 @@
 cd "$(dirname "$0")/.." || exit 1
 
 # 2. 安全地创建并进入 build 目录
+rm -rf build || exit 1
 mkdir -p build
 cd build || exit 1
 
@@ -13,10 +14,4 @@ cd build || exit 1
 cmake -DDK_TEST=ON .. || exit 1
 
 # 4. 编译
-make -j4 || exit 1
-
-# 5. 运行测试程序
-# 注意：此时当前目录是 build/，编译产物在 build/tests/ 里面
-./tests/test_dk_core 
-./tests/test_dk_future 
-./tests/test_dk_http
+make -j16 || exit 1

@@ -12,7 +12,14 @@
 #include <variant>
 
 namespace dk {
+// ============================================================================
+// 2. 抽象调度器定义
+// ============================================================================
+// 投递到微队列的方法: 接收一个无参函数，放入队列执行
+using Dispatcher = std::function<void(std::function<void()>)>;
 
+// 超时调度器: 接收(毫秒数, 回调函数)，返回一个可以用来【取消定时器】的函数
+using TimeoutScheduler = std::function<std::function<void()>(uint32_t, std::function<void()>)>;
 // ============================================================================
 // 1. 基础组件：异常与取消令牌
 // ============================================================================
@@ -21,6 +28,23 @@ struct CancelledException : public std::runtime_error {
 };
 struct TimeoutException : public std::runtime_error {
     TimeoutException() : std::runtime_error("Future task timeout!") {}
+};
+
+// 如果有人在then中注册了void函数，则使用这个假的类型代替返回类型void
+struct Unit {
+    // 随便加个比较运算符，方便以后可能用得上
+    bool operator==(const Unit&) const { return true; }
+};
+
+class IAsyncRuntime {
+   public:
+    virtual ~IAsyncRuntime() = default;
+    // 强制子类必须实现：投递到微队列
+    virtual void post_future_task(std::function<void()> task) = 0;
+    // 强制子类必须实现：设置定时器并返回取消句柄
+    virtual std::function<void()> set_future_timeout(uint32_t ms, std::function<void()> on_timeout) = 0;
+    // 获取事件循环线程的id(这里假设只有一个事件循环线程)
+    virtual std::thread::id get_thread_id() = 0;
 };
 
 class CancellationToken {
@@ -41,26 +65,23 @@ class CancellationTokenSource {
     void cancel() {
         if (cancelled_) cancelled_->store(true, std::memory_order_relaxed);
     }
-};
 
-// ============================================================================
-// 2. 抽象调度器定义
-// ============================================================================
-// 投递到微队列的方法: 接收一个无参函数，放入队列执行
-using Dispatcher = std::function<void(std::function<void()>)>;
+    // ⭐ 新增：经过指定时间后自动触发 Cancel
+    void cancel_after(uint32_t ms, TimeoutScheduler timeout_scheduler) {
+        if (!timeout_scheduler) return;
 
-// 超时调度器: 接收(毫秒数, 回调函数)，返回一个可以用来【取消定时器】的函数
-using TimeoutScheduler = std::function<std::function<void()>(uint32_t, std::function<void()>)>;
+        // 注意：这里需要捕获自身的弱引用或 shared_ptr 来确保生命周期安全
+        timeout_scheduler(ms, [weak_flag = std::weak_ptr<std::atomic<bool>>(cancelled_)]() {
+            if (auto flag = weak_flag.lock()) {
+                flag->store(true, std::memory_order_relaxed);
+            }
+        });
+    }
 
-class IAsyncRuntime {
-   public:
-    virtual ~IAsyncRuntime() = default;
-    // 强制子类必须实现：投递到微队列
-    virtual void post_future_task(std::function<void()> task) = 0;
-    // 强制子类必须实现：设置定时器并返回取消句柄
-    virtual std::function<void()> set_future_timeout(uint32_t ms, std::function<void()> on_timeout) = 0;
-    // 获取事件循环线程的id(这里假设只有一个事件循环线程)
-    virtual std::thread::id get_thread_id() = 0;
+    void cancel_after(uint32_t ms, IAsyncRuntime* rt) {
+        cancel_after(ms,
+                     [rt](uint32_t m, std::function<void()> cb) { return rt->set_future_timeout(m, std::move(cb)); });
+    }
 };
 
 // ============================================================================
@@ -79,14 +100,14 @@ struct is_future<Future<T>> : std::true_type {};
 // ============================================================================
 // 4. 共享状态核心
 // ============================================================================
-enum class FutureState { PENDING, FULFILLED, REJECTED };
+enum class PromiseState { PENDING, FULFILLED, REJECTED };
 
 template <typename T>
 struct SharedState {
     std::mutex mtx;
     std::condition_variable cv;
     std::thread::id dispatcher_thread_id;
-    FutureState state = FutureState::PENDING;
+    PromiseState state = PromiseState::PENDING;
     std::optional<T> value;
     std::exception_ptr error;
     std::optional<CancellationToken> token;
@@ -123,33 +144,6 @@ class Future {
    public:
     using value_type = T;
     explicit Future(std::shared_ptr<SharedState<T>> state) : state_(std::move(state)) {}
-
-    // 【静态快捷方法：直接返回一个已完成的 Future】
-    static Future<T> resolve(T val, Dispatcher disp, TimeoutScheduler timer_disp = nullptr) {
-        Promise<T> p(disp, timer_disp);
-        p.resolve(std::move(val));
-        return p.get_future();
-    }
-
-    static Future<T> reject(std::exception_ptr e, Dispatcher disp, TimeoutScheduler timer_disp = nullptr) {
-        Promise<T> p(disp, timer_disp);
-        p.reject(e);
-        return p.get_future();
-    }
-
-    template <typename Runtime>
-    static Future<T> resolve(T val, Runtime* rt) {
-        Promise<T> p(rt);  // 直接塞入引擎指针
-        p.resolve(std::move(val));
-        return p.get_future();
-    }
-
-    template <typename Runtime>
-    static Future<T> reject(std::exception_ptr e, Runtime* rt) {
-        Promise<T> p(rt);
-        p.reject(e);
-        return p.get_future();
-    }
 
     // ========================================================================
     // 独立操作符：超时控制，给当前的future添加而不是下一个then
@@ -243,48 +237,78 @@ class Future {
     auto then(Func&& cb) {
         // 1. 编译期探测参数类型
         constexpr bool accepts_token = std::is_invocable_v<Func, T, CancellationToken>;
-        using RawRetType = typename std::conditional_t<accepts_token, std::invoke_result<Func, T, CancellationToken>,
-                                                       std::invoke_result<Func, T>>::type;
+        // 🌟 修复：必须使用不带 _t 的 std::invoke_result 结构体，进行“惰性求值”
+        using RawRetTrait = std::conditional_t<accepts_token, std::invoke_result<Func, T, CancellationToken>,
+                                               std::invoke_result<Func, T>>;
+        // 🌟 只有在确定了用哪个 trait 之后，才安全地提取 ::type
+        using RawRetType = typename RawRetTrait::type;
 
         // 2. 剥离可能的 Future 嵌套
         constexpr bool returns_future = is_future<RawRetType>::value;
         using InnerType = typename detail::unwrap_future_type<RawRetType, returns_future>::type;
-
-        // 创建下一个 Promise
+        // 3. 定义安全的底层类型 (将 void 映射为 Unit)
+        using SafeInnerType = std::conditional_t<std::is_void_v<InnerType>, Unit, InnerType>;
+        // 创建下一个 Promise (底层永远使用 SafeInnerType)
         auto next_promise =
-            std::make_shared<Promise<InnerType>>(state_->dispatcher, state_->timeout_scheduler, state_->token);
+            std::make_shared<Promise<SafeInnerType>>(state_->dispatcher, state_->timeout_scheduler, state_->token);
 
         auto next_future = next_promise->get_future();
 
         // 3. 包装业务 Callback
-        // ⭐ 关键修复 1：捕获当前的 state，保证智能指针的生命周期
         std::function<void(T)> wrapped_cb = [cb = std::forward<Func>(cb), next_promise,
                                              current_state = this->state_](T val) mutable {
             try {
-                // ⭐ 关键修复 2 & 3：安全检查 Optional，抛出标准取消异常
                 if (current_state->token && current_state->token->is_cancelled()) {
                     throw CancelledException();
                 }
 
-                // 执行用户逻辑 (动态参数注入)
-                auto res = [&]() -> RawRetType {
+                auto execute_cb = [&]() -> decltype(auto) {
                     if constexpr (accepts_token) {
-                        // 注入当前状态里的 token
                         return cb(std::move(val), current_state->token.value_or(dk::CancellationToken{}));
                     } else {
                         return cb(std::move(val));
                     }
-                }();
+                };
 
-                // 结果派发与展平
+                // =========================================================
+                // ☢️ 终极防御墙：
+                // 1. 显式地在这个局部栈上创建一个普通的 shared_ptr。
+                // 2. 彻底切断 GCC 将其认作外层 lambda 类成员变量的念想。
+                // =========================================================
+                std::shared_ptr<Promise<SafeInnerType>> local_p = next_promise;
+
+                // 3. 内层 lambda 只能使用最普通的 [local_p] 捕获！【绝对不要带等号】
+                auto on_inner_void = [local_p](auto&&...) {
+                    local_p->resolve(Unit{});
+                    return Unit{};
+                };
+
+                auto on_inner_val = [local_p](auto&& inner_val) {
+                    local_p->resolve(std::forward<decltype(inner_val)>(inner_val));
+                    return inner_val;  // dummy return
+                };
+
+                auto on_inner_error = [local_p](std::exception_ptr e) { local_p->reject(e); };
+
+                // ---------------------------------------------------------
+                // 正常进入分支逻辑
+                // ---------------------------------------------------------
                 if constexpr (returns_future) {
-                    res.then([next_promise](InnerType inner_val) {
-                           next_promise->resolve(std::move(inner_val));
-                           return inner_val;  // dummy return
-                       })
-                        .catch_error([next_promise](std::exception_ptr e) { next_promise->reject(e); });
+                    auto inner_future = execute_cb();
+
+                    if constexpr (std::is_void_v<InnerType>) {
+                        inner_future.then(on_inner_void).catch_error(on_inner_error);
+                    } else {
+                        inner_future.then(on_inner_val).catch_error(on_inner_error);
+                    }
                 } else {
-                    next_promise->resolve(std::move(res));
+                    if constexpr (std::is_void_v<RawRetType>) {
+                        execute_cb();
+                        local_p->resolve(Unit{});
+                    } else {
+                        auto res = execute_cb();
+                        local_p->resolve(std::move(res));
+                    }
                 }
             } catch (...) {
                 next_promise->reject(std::current_exception());
@@ -296,98 +320,7 @@ class Future {
         };
 
         register_callbacks(std::move(wrapped_cb), std::move(wrapped_reject));
-        return next_future;
-    }
-
-    // ========================================================================
-    // 同步阻塞方法
-    // ========================================================================
-
-    // 阻塞当前线程，直到 Future 完成 (Fulfilled 或 Rejected)
-    void wait() const {
-        std::unique_lock<std::mutex> lock(state_->mtx);  // 1. 先加锁，保护读取操作
-        // 2. 只有当任务还没有完成时，在 dispatcher 线程里 wait 才会有死锁风险！
-        // 如果已经完成（非 PENDING），直接让它顺畅通过即可。
-        if (state_->state == FutureState::PENDING) {
-            if (state_->dispatcher_thread_id == std::this_thread::get_id()) {
-                throw std::logic_error(
-                    "FATAL: Do not call get() or wait() inside the async event loop thread! It will cause a deadlock.");
-            }
-        }
-        state_->cv.wait(lock, [this]() { return state_->state != FutureState::PENDING; });
-    }
-
-    // 阻塞等待指定时间（chrono 接口）
-    template <class Rep, class Period>
-    FutureState wait_for(const std::chrono::duration<Rep, Period>& timeout_duration) const {
-        std::unique_lock<std::mutex> lock(state_->mtx);
-        state_->cv.wait_for(lock, timeout_duration, [this]() { return state_->state != FutureState::PENDING; });
-        return state_->state;
-    }
-
-    // 阻塞等待指定毫秒数（快捷接口）
-    FutureState wait_for(uint32_t timeout_ms) const { return wait_for(std::chrono::milliseconds(timeout_ms)); }
-
-    // 阻塞等待并获取结果，如果有异常则重新抛出
-    T get() {
-        wait();  // 复用上面的 wait()
-
-        // wait 结束后，状态必定不是 PENDING，此时无需再加锁
-        if (state_->state == FutureState::FULFILLED) {
-            // 注意：这里使用 std::move，意味着 get() 只能调用一次，
-            // 且后续 .then() 可能无法获取原值（与 std::future 行为保持一致）
-            return std::move(state_->value.value());
-        } else {
-            // 将内部的 exception_ptr 重新在当前线程抛出
-            std::rethrow_exception(state_->error);
-        }
-    }
-
-   private:
-    void register_callbacks(std::function<void(T)> on_res, std::function<void(std::exception_ptr)> on_rej) {
-        std::unique_lock<std::mutex> lock(state_->mtx);
-        if (state_->state == FutureState::PENDING) {
-            state_->on_resolve = std::move(on_res);
-            state_->on_reject = std::move(on_rej);
-        } else if (state_->state == FutureState::FULFILLED) {
-            T val = state_->value.value();
-            state_->dispatcher([cb = std::move(on_res), val]() { cb(val); });
-        } else {
-            std::exception_ptr e = state_->error;
-            state_->dispatcher([cb = std::move(on_rej), e]() { cb(e); });
-        }
-    }
-};
-
-// ============================================================================
-// 6. Promise 类 (生产者)
-// ============================================================================
-template <typename T>
-class Promise {
-    std::shared_ptr<SharedState<T>> state_;
-
-   public:
-    // 构造注入 Dispatcher
-    Promise(Dispatcher disp, TimeoutScheduler timeout_disp = nullptr,
-            std::optional<CancellationToken> token = std::nullopt)
-        : state_(std::make_shared<SharedState<T>>()) {
-        state_->dispatcher = std::move(disp);
-        state_->timeout_scheduler = std::move(timeout_disp);
-        state_->token = std::move(token);
-    }
-
-    ~Promise() {
-        // 需要加锁或者检查内部状态
-        bool is_pending = false;
-        {
-            std::unique_lock<std::mutex> lock(state_->mtx);
-            is_pending = (state_->state == FutureState::PENDING);
-        }
-
-        if (is_pending) {
-            reject(std::make_exception_ptr(
-                std::runtime_error("Broken Promise: Event was dropped without being resolved or rejected.")));
-        }
+        return next_future;  // 对外返回的是 Future<SafeInnerType>
     }
 
     // ========================================================================
@@ -456,6 +389,99 @@ class Promise {
         return next_future;
     }
 
+    // ========================================================================
+    // 同步阻塞方法
+    // ========================================================================
+
+    // 阻塞当前线程，直到 Future 完成 (Fulfilled 或 Rejected)
+    void wait() const {
+        std::unique_lock<std::mutex> lock(state_->mtx);  // 1. 先加锁，保护读取操作
+        // 2. 只有当任务还没有完成时，在 dispatcher 线程里 wait 才会有死锁风险！
+        // 如果已经完成（非 PENDING），直接让它顺畅通过即可。
+        if (state_->state == PromiseState::PENDING) {
+            if (state_->dispatcher_thread_id == std::this_thread::get_id()) {
+                throw std::logic_error(
+                    "FATAL: Do not call get() or wait() inside the async event loop thread! It will cause a deadlock.");
+            }
+        }
+        state_->cv.wait(lock, [this]() { return state_->state != PromiseState::PENDING; });
+    }
+
+    // 阻塞等待指定时间（chrono 接口）
+    template <class Rep, class Period>
+    PromiseState wait_for(const std::chrono::duration<Rep, Period>& timeout_duration) const {
+        std::unique_lock<std::mutex> lock(state_->mtx);
+        state_->cv.wait_for(lock, timeout_duration, [this]() { return state_->state != PromiseState::PENDING; });
+        return state_->state;
+    }
+
+    // 阻塞等待指定毫秒数（快捷接口）
+    PromiseState wait_for(uint32_t timeout_ms) const { return wait_for(std::chrono::milliseconds(timeout_ms)); }
+
+    // 阻塞等待并获取结果，如果有异常则重新抛出
+    T get() {
+        wait();  // 复用上面的 wait()
+
+        // wait 结束后，状态必定不是 PENDING，此时无需再加锁
+        if (state_->state == PromiseState::FULFILLED) {
+            // 注意：这里使用 std::move，意味着 get() 只能调用一次，
+            // 且后续 .then() 可能无法获取原值（与 std::future 行为保持一致）
+            return std::move(state_->value.value());
+        } else {
+            // 将内部的 exception_ptr 重新在当前线程抛出
+            std::rethrow_exception(state_->error);
+        }
+    }
+
+   private:
+    void register_callbacks(std::function<void(T)> on_res, std::function<void(std::exception_ptr)> on_rej) {
+        std::unique_lock<std::mutex> lock(state_->mtx);
+        if (state_->state == PromiseState::PENDING) {
+            state_->on_resolve = std::move(on_res);
+            state_->on_reject = std::move(on_rej);
+        } else if (state_->state == PromiseState::FULFILLED) {
+            T val = state_->value.value();
+            state_->dispatcher([cb = std::move(on_res), val]() { cb(val); });
+        } else {
+            std::exception_ptr e = state_->error;
+            state_->dispatcher([cb = std::move(on_rej), e]() { cb(e); });
+        }
+    }
+};
+
+// ============================================================================
+// 6. Promise 类 (生产者)
+// ============================================================================
+template <typename T>
+class Promise {
+    std::shared_ptr<SharedState<T>> state_;
+
+   public:
+    // 构造注入 Dispatcher
+    Promise(Dispatcher disp, TimeoutScheduler timeout_disp = nullptr,
+            std::optional<CancellationToken> token = std::nullopt)
+        : state_(std::make_shared<SharedState<T>>()) {
+        state_->dispatcher = std::move(disp);
+        state_->timeout_scheduler = std::move(timeout_disp);
+        state_->token = std::move(token);
+    }
+
+    ~Promise() {
+        // 需要加锁或者检查内部状态
+        bool is_pending = false;
+        {
+            std::unique_lock<std::mutex> lock(state_->mtx);
+            is_pending = (state_->state == PromiseState::PENDING);
+        }
+
+        if (is_pending) {
+            reject(std::make_exception_ptr(
+                std::runtime_error("Broken Promise: Event was dropped without being resolved or rejected.")));
+        }
+    }
+
+    PromiseState state() { return state_->state; }
+
     explicit Promise(IAsyncRuntime* rt, std::optional<CancellationToken> token = std::nullopt)
         : state_(std::make_shared<SharedState<T>>()) {
         // 自动解包 1：将 rt 的内部方法绑定为微队列派发器
@@ -469,12 +495,24 @@ class Promise {
 
     Future<T> get_future() { return Future<T>(state_); }
 
+    static Future<T> resolve(IAsyncRuntime* rt, T val, std::optional<CancellationToken> token = std::nullopt) {
+        auto p = Promise<T>(rt, token);
+        p.resolve(val);
+        return p.get_future();
+    }
+
+    static Future<T> reject(IAsyncRuntime* rt, T val, std::optional<CancellationToken> token = std::nullopt) {
+        auto p = Promise<T>(rt, token);
+        p.reject(val);
+        return p.get_future();
+    }
+
     void resolve(T val) {
         std::function<void(T)> cb;
         {
             std::unique_lock<std::mutex> lock(state_->mtx);
-            if (state_->state != FutureState::PENDING) return;
-            state_->state = FutureState::FULFILLED;
+            if (state_->state != PromiseState::PENDING) return;
+            state_->state = PromiseState::FULFILLED;
             state_->value = val;
             cb = std::move(state_->on_resolve);
             state_->on_reject = nullptr;
@@ -488,12 +526,14 @@ class Promise {
         }
     }
 
+    void reject(std::string error) { reject(std::make_exception_ptr(std::runtime_error(error))); }
+
     void reject(std::exception_ptr e) {
         std::function<void(std::exception_ptr)> cb;
         {
             std::unique_lock<std::mutex> lock(state_->mtx);
-            if (state_->state != FutureState::PENDING) return;
-            state_->state = FutureState::REJECTED;
+            if (state_->state != PromiseState::PENDING) return;
+            state_->state = PromiseState::REJECTED;
             state_->error = e;
             cb = std::move(state_->on_reject);
             state_->on_reject = nullptr;

@@ -20,6 +20,7 @@ using TestEvent =
 struct TestContext : dk::BaseContext<TestEvent, TestContext> {
     int ping_count = 0;
     std::vector<std::string> log;  // 记录执行顺序
+    std::mutex log_mtx;
 };
 
 // ================== 2. 测试引擎与状态定义 ==================
@@ -28,9 +29,13 @@ class TestEngine : public dk::BaseEngine<TestEvent, TestContext, TestEngine> {
    public:
     // 测试全局 Hook：记录进出状态
     void on_event(const dk::EnterEvent& e, TestContext& ctx) {
+        std::lock_guard<std::mutex> lock(ctx.log_mtx);
         ctx.log.push_back(std::string("ENTER_") + e.state_name);
     }
-    void on_event(const dk::ExitEvent& e, TestContext& ctx) { ctx.log.push_back(std::string("EXIT_") + e.state_name); }
+    void on_event(const dk::ExitEvent& e, TestContext& ctx) {
+        std::lock_guard<std::mutex> lock(ctx.log_mtx);
+        ctx.log.push_back(std::string("EXIT_") + e.state_name);
+    }
 };
 
 using StatePtr = std::shared_ptr<dk::IState<TestEvent, TestContext>>;
@@ -58,6 +63,7 @@ class StateB : public dk::PureState<TestEvent, TestContext, StateB> {
 
 // 测试流转
 StatePtr StateA::on_event(const EvPing&, TestContext& ctx) {
+    std::lock_guard<std::mutex> lock(ctx.log_mtx);
     ctx.ping_count++;
     ctx.log.push_back("Ping_Handled");
     return StateB::instance();
@@ -65,6 +71,7 @@ StatePtr StateA::on_event(const EvPing&, TestContext& ctx) {
 
 // 测试异步事件处理
 StatePtr StateA::on_event(const EvAsyncQuery& e, TestContext& ctx) {
+    std::lock_guard<std::mutex> lock(ctx.log_mtx);
     ctx.log.push_back("Async_Handled");
     e.resolve(42);  // 返回异步结果
     return nullptr;
@@ -72,6 +79,7 @@ StatePtr StateA::on_event(const EvAsyncQuery& e, TestContext& ctx) {
 
 // 测试微队列派发
 StatePtr StateA::on_event(const EvTriggerInternal&, TestContext& ctx) {
+    std::lock_guard<std::mutex> lock(ctx.log_mtx);
     ctx.log.push_back("Trigger_Macro");
     // 投递微队列（高优）
     ctx.engine->dispatch_internal(EvPing{});
@@ -79,6 +87,7 @@ StatePtr StateA::on_event(const EvTriggerInternal&, TestContext& ctx) {
 }
 
 StatePtr StateB::on_event(const EvPong&, TestContext& ctx) {
+    std::lock_guard<std::mutex> lock(ctx.log_mtx);
     ctx.log.push_back("Pong_Handled");
     return StateA::instance();
 }
@@ -107,8 +116,8 @@ TEST_F(DkFrameworkTest, BasicStateTransitionAndHooks) {
 
     const auto& log = engine->get_context().log;  // 假设你在 Engine 里加了 get_context()
 
+    std::lock_guard<std::mutex> lock(engine->get_context().log_mtx);
     EXPECT_EQ(engine->get_context().ping_count, 1);
-
     // 检查执行顺序：进入A -> 处理Ping -> 离开A -> 进入B
     ASSERT_GE(log.size(), 4);
     EXPECT_EQ(log[0], "ENTER_StateA");
@@ -126,7 +135,7 @@ TEST_F(DkFrameworkTest, MicroQueuePriority) {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     const auto& log = engine->get_context().log;
-
+    std::lock_guard<std::mutex> lock(engine->get_context().log_mtx);
     // 核心逻辑：EvTriggerInternal 会触发内部事件 EvPing。
     // 框架要求必须先把 EvPing（内部微队列）处理完，再去处理后面的宏任务 EvPong。
     auto trigger_idx = std::find(log.begin(), log.end(), "Trigger_Macro") - log.begin();
@@ -146,7 +155,7 @@ TEST_F(DkFrameworkTest, AsyncEventResolve) {
     // 阻塞等待状态机处理并 resolve
     // 设置超时防止死锁（500ms 内必须返回）
     auto status = fut.wait_for(500);
-    ASSERT_EQ(status, dk::FutureState::FULFILLED) << "Future timed out!";
+    ASSERT_EQ(status, dk::PromiseState::FULFILLED) << "Future timed out!";
 
     int result = fut.get();
     EXPECT_EQ(result, 42);  // StateA 中写死了 resolve(42)

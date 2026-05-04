@@ -39,29 +39,82 @@ struct lambda_traits<ReturnType (ClassType::*)(ArgType) const> {
     using arg_type = std::decay_t<ArgType>;  // 提取出具体的事件类型
 };
 
+template <class... Ts>
+struct overloaded : Ts... {
+    using Ts::operator()...;
+};
+template <class... Ts>
+overloaded(Ts...) -> overloaded<Ts...>;
+
 // 提供给State的抽象接口
-template <typename Event, typename Context>
-class IEngine {
-   public:
+template <typename Event, typename Context, typename StateType>
+class IEngine : public IAsyncRuntime {
+   private:
     // 临时注册事件回调，直到满足条件或者超时，EventType是具体的事件类型
     // 底层虚函数：接收总的 Variant 事件进行判断
-    virtual Future<bool> wait_internal(std::function<bool(const Event&)> predicate, double timeout = 5000) = 0;
-    // ================= 用户层魔法 API =================
-    // 用户只需要写： engine->wait([](const SpecificEvent& e) { return e.id == 1; });
-    template <typename F>
-    Future<bool> wait(F&& predicate, double timeout = 5000) {
-        // 1. 自动推导用户 Lambda 接收的是哪个具体的事件类型（比如 TickEvent）
-        using SpecificEvent = typename lambda_traits<std::decay_t<F>>::arg_type;
-        // 2. 包装用户的 predicate，抹平多态差异
-        auto wrapper = [pred = std::forward<F>(predicate)](const Event& variant_event) -> bool {
-            // 3. 核心：如果来的事件根本就不是我们等的那种事件，直接忽略！
-            if (const auto* specific_event = std::get_if<SpecificEvent>(&variant_event)) {
-                return pred(*specific_event);  // 类型匹配，执行业务判断
-            }
-            return false;  // 类型不匹配，当做条件不成立，继续在队列里等下一个事件
+    virtual Future<bool> wait_internal(std::function<bool(const Event&)> predicate, CancellationToken token) = 0;
+
+   public:
+    virtual void step(std::shared_ptr<StateType> next_state) = 0;
+
+    template <typename... Funcs>
+    Future<bool> wait(CancellationToken token, Funcs&&... funcs) {
+        // 内部自动帮你加 overloaded
+        auto visitor = overloaded{std::forward<Funcs>(funcs)...};
+
+        auto wrapper = [v = std::move(visitor)](const Event& variant_event) -> bool {
+            return std::visit(
+                [&v](const auto& specific_event) -> bool {
+                    using EventType = std::decay_t<decltype(specific_event)>;
+                    if constexpr (std::is_invocable_r_v<bool, decltype(v), EventType>) {
+                        return v(specific_event);
+                    } else {
+                        return false;
+                    }
+                },
+                variant_event);
         };
-        // 4. 将包装后的方法注册到底层
-        return wait_internal(wrapper, timeout);
+
+        return wait_internal(std::move(wrapper), std::move(token));
+    }
+
+    /*
+        ## 为事件注册一个监听器，使用方法：(无论是监听一个事件，还是多个事件，API 完美统一，没有任何 nullopt 校验！)
+        ```
+        engine->wait_for(500,
+            [](const TickEvent& e) {
+                return false;  // 来 Tick 了，处理完继续听
+            },
+            [](const TradeEvent& e) {
+                return true; // 来 Trade 了，处理完停止监听
+            }
+        );
+    ```
+    */
+    template <typename... Funcs>
+    Future<bool> wait_for(uint32_t timeout_ms, Funcs&&... funcs) {
+        std::shared_ptr<CancellationTokenSource> source = std::make_shared<CancellationTokenSource>();
+        auto token = source->get_token();
+
+        if (timeout_ms > 0) source->cancel_after(timeout_ms, this);
+
+        // 内部自动帮你加 overloaded
+        auto visitor = overloaded{std::forward<Funcs>(funcs)...};
+
+        auto wrapper = [v = std::move(visitor), source](const Event& variant_event) -> bool {
+            return std::visit(
+                [&v](const auto& specific_event) -> bool {
+                    using EventType = std::decay_t<decltype(specific_event)>;
+                    if constexpr (std::is_invocable_r_v<bool, decltype(v), EventType>) {
+                        return v(specific_event);
+                    } else {
+                        return false;
+                    }
+                },
+                variant_event);
+        };
+
+        return wait_internal(std::move(wrapper), std::move(token));
     }
 
     // 派发内部高优事件（微队列）
@@ -117,14 +170,23 @@ struct AsyncEvent {
     bool is_awaited() const { return promise_ != nullptr; }
 };
 
+template <typename Event, typename Context>
+class IState {
+   public:
+    virtual ~IState() = default;
+    virtual std::shared_ptr<IState<Event, Context>> handle_event(const Event& event, Context& ctx) = 0;
+    virtual const std::string name() const = 0;
+};
+
 template <typename Event, typename Derived>
 struct BaseContext {
     // 存放业务上下文数据
-    IEngine<Event, Derived>* engine;
+    IEngine<Event, Derived, IState<Event, Derived>>* engine;
 };
 
 // 调用handle_event时根据event类型, 给on_event分发
 // BaseInterface: 抽象基类，必须有一个虚函数叫做hand_event
+// BaseInterface是做类型擦除的，可以不需要DerivedChild这个类型
 template <typename BaseInterface, typename Event, typename Context, typename ReturnType, typename DerivedChild>
 class IEventHandler : public BaseInterface {
    public:
@@ -174,14 +236,6 @@ class IEventListener {
 template <typename Event, typename Context, typename DerivedChild>
 class BaseEventListener : public IEventHandler<IEventListener<Event, Context>, Event, Context, void, DerivedChild> {};
 
-template <typename Event, typename Context>
-class IState {
-   public:
-    virtual ~IState() = default;
-    virtual std::shared_ptr<IState<Event, Context>> handle_event(const Event& event, Context& ctx) = 0;
-    virtual const std::string name() const = 0;
-};
-
 template <typename Event, typename Context, typename DerivedChild>
 class BaseState : public IEventHandler<IState<Event, Context>, Event, Context, std::shared_ptr<IState<Event, Context>>,
                                        DerivedChild> {
@@ -212,9 +266,9 @@ class PureState : public BaseState<Event, Context, DerivedChild> {
 
 // 引入 CRTP 允许外部重写 Engine 的 on_event
 template <typename Event, typename Context, typename DerivedEngine>
-class BaseEngine : public std::enable_shared_from_this<BaseEngine<Event, Context, DerivedEngine>>,
-                   public IEventHandler<IEngine<Event, Context>, Event, Context, void, DerivedEngine>,
-                   public IAsyncRuntime {
+class BaseEngine
+    : public std::enable_shared_from_this<BaseEngine<Event, Context, DerivedEngine>>,
+      public IEventHandler<IEngine<Event, Context, IState<Event, Context>>, Event, Context, void, DerivedEngine> {
     using StateType = IState<Event, Context>;
     using EventListenerPtr = std::shared_ptr<IEventListener<Event, Context>>;
 
@@ -310,30 +364,17 @@ class BaseEngine : public std::enable_shared_from_this<BaseEngine<Event, Context
         return future;
     }
 
-    Future<bool> wait_internal(std::function<bool(const Event&)> predicate, double timeout = 5000) override {
-        auto promise = std::make_shared<Promise<bool>>(this);
+    // 为若干个事件注册【一个】监听器，如果return False则继续监听
+    Future<bool> wait_internal(std::function<bool(const Event&)> predicate, CancellationToken token) override {
+        auto promise = std::make_shared<Promise<bool>>(this, token);
         Future<bool> future = promise->get_future();
         // 将注册动作投入无锁的主循环
-        boost::asio::post(io_context_, [this, predicate = std::move(predicate), promise, timeout]() {
+        boost::asio::post(io_context_, [this, predicate = std::move(predicate), promise, token]() {
             uint64_t id = ++next_wait_id_;
             auto node = std::make_shared<WaitNode>();
             node->id = id;
             node->predicate = std::move(predicate);
             node->promise = promise;
-
-            node->timer = std::make_shared<boost::asio::steady_timer>(io_context_);
-            node->timer->expires_after(std::chrono::milliseconds(static_cast<long long>(timeout)));
-
-            node->timer->async_wait([this, id](const boost::system::error_code& ec) {
-                if (ec == boost::asio::error::operation_aborted) return;
-
-                auto it = active_waits_.find(id);
-                if (it != active_waits_.end()) {
-                    auto p = it->second->promise;
-                    active_waits_.erase(it);
-                    p->resolve(false);  // 超时未等到
-                }
-            });
             active_waits_[id] = node;
         });
         return future;
@@ -351,7 +392,7 @@ class BaseEngine : public std::enable_shared_from_this<BaseEngine<Event, Context
         schedule_next_tick();
 
         workflow_pool_.emplace(std::make_unique<boost::asio::thread_pool>(4));
-        transition(initial_state);
+        step(initial_state);
         running_ = true;
 
         worker_thread_ = std::thread([this]() {
@@ -390,9 +431,8 @@ class BaseEngine : public std::enable_shared_from_this<BaseEngine<Event, Context
         boost::asio::defer(io_context_, [this, e = std::move(e)]() mutable { this->process_internal(e); });
     }
 
-   private:
     // 状态流转闭环
-    void transition(std::shared_ptr<StateType> next_state) {
+    void step(std::shared_ptr<StateType> next_state) override {
         if (!next_state) return;
 
         if (state_) {
@@ -416,9 +456,11 @@ class BaseEngine : public std::enable_shared_from_this<BaseEngine<Event, Context
         // 注意：使用 C++11 的 erase 方式，防止迭代器失效
         for (auto it = active_waits_.begin(); it != active_waits_.end();) {
             // 传入 e 进行嗅探
-            if (it->second->predicate(e)) {
+            if (it->second->promise->state() != PromiseState::PENDING) {
+                // 清理超时的等待者
+                it = active_waits_.erase(it);
+            } else if (it->second->predicate(e)) {
                 // 条件满足！
-                it->second->timer->cancel();         // 取消超时定时器
                 it->second->promise->resolve(true);  // 成功触发，返回 true
                 it = active_waits_.erase(it);        // 从队列中移除（不需要再次排队了）
             } else {
@@ -435,7 +477,7 @@ class BaseEngine : public std::enable_shared_from_this<BaseEngine<Event, Context
         if (!state_) return;
         auto next_state = state_->handle_event(e, ctx_);
         if (next_state && next_state != state_) {
-            transition(next_state);
+            step(next_state);
         }
     }
 
@@ -454,12 +496,25 @@ class BaseEngine : public std::enable_shared_from_this<BaseEngine<Event, Context
 };
 
 // 适配器基类，绑定特定的引擎类型
-template <typename Event, typename EngineType>
+template <typename Event, typename Context, typename DerivedEngine>
 class BaseAdapter {
+    std::shared_ptr<BaseEngine<Event, Context, DerivedEngine>> engine_;
+
    protected:
-    std::shared_ptr<EngineType> engine_;
+    /*
+     异步触发一个事件（通常是需要获取事件处理结果），底层是向boost::asio::post提交一个事件处理的任务，任务中如果调用AsyncEvent.resolve()则Future能够正确获取结果。
+    */
+    template <typename E>
+    Future<typename E::ReturnType> dispatch_async(E e, uint32_t timeout_ms = 5000) {
+        return engine_->dispatch_async(e, timeout_ms);
+    }
+
+    /*
+        用boost::asio::post提交一个事件处理任务
+    */
+    void dispatch(Event e) { engine_->dispatch(e); }
 
    public:
-    BaseAdapter(std::shared_ptr<EngineType> engine) : engine_(engine) {}
+    BaseAdapter(std::shared_ptr<DerivedEngine> engine) : engine_(engine) {}
 };
 }  // namespace dk

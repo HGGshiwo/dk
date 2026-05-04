@@ -72,7 +72,7 @@ TEST_F(DkFutureTest, BasicChain) {
     std::promise<void> test_done;  // 用于阻塞 GTest 等待异步完成
     std::string final_result;
 
-    Future<int>::resolve(10, runtime_.get())
+    Promise<int>::resolve(runtime_.get(), 10)
         .then([](int val) { return val * 2; })
         .then([](int val) { return std::string("Result: ") + std::to_string(val); })
         .then([&](std::string str) {
@@ -95,7 +95,7 @@ TEST_F(DkFutureTest, FutureFlattening) {
     std::promise<void> test_done;
     std::string final_result;
 
-    Future<int>::resolve(100, runtime_.get())
+    Promise<int>::resolve(runtime_.get(), 100)
         .then([this](int val) {
             // 返回内部的新 Future
             auto p = std::make_shared<Promise<std::string>>(runtime_.get());
@@ -132,7 +132,7 @@ TEST_F(DkFutureTest, Cancellation) {
     // 在注册前立刻取消
     cts.cancel();
 
-    Future<int>::resolve(1, runtime_.get())
+    dk::Promise<int>::resolve(runtime_.get(), 1)
         .with_cancellation(token)
         .then([&](int val, CancellationToken t) {
             step1_executed = true;  // 如果 token 机制生效，这行绝对不会执行
