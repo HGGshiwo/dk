@@ -1,15 +1,19 @@
 #pragma once
-
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <thread>
 #include <type_traits>
 #include <variant>
+
+#include "./exception.hpp"
+#include "./utils.hpp"
 
 namespace dk {
 // ============================================================================
@@ -230,75 +234,83 @@ class Future {
         return next_future;
     }
 
-    // ========================================================================
-    // 纯粹的 then: 只负责类型推导和 Future 展平
-    // ========================================================================
+    /*
+        支持四种入参：0个参数，1个参数：上一个Future的返回值 or CacellationToken，
+        2个参数：上一个Future的返回值 + CancellationToken
+    */
     template <typename Func>
     auto then(Func&& cb) {
-        // 1. 编译期探测参数类型
-        constexpr bool accepts_token = std::is_invocable_v<Func, T, CancellationToken>;
-        // 🌟 修复：必须使用不带 _t 的 std::invoke_result 结构体，进行“惰性求值”
-        using RawRetTrait = std::conditional_t<accepts_token, std::invoke_result<Func, T, CancellationToken>,
-                                               std::invoke_result<Func, T>>;
-        // 🌟 只有在确定了用哪个 trait 之后，才安全地提取 ::type
-        using RawRetType = typename RawRetTrait::type;
+        // =====================================================================
+        // 1. 编译期无损探测 (Probing)
+        // 利用 C++17 的 is_invocable_v，完美避开泛型 Lambda 和重载函数的解析问题
+        // =====================================================================
+        static constexpr bool takes_both = std::is_invocable_v<Func, T, dk::CancellationToken>;
+        static constexpr bool takes_t = std::is_invocable_v<Func, T>;
+        static constexpr bool takes_token = std::is_invocable_v<Func, dk::CancellationToken>;
+        static constexpr bool takes_none = std::is_invocable_v<Func>;
+        static_assert(takes_both || takes_t || takes_token || takes_none,
+                      "Callback signature is not supported! Must accept (T, Token), (T), (Token), or ().");
+        // =====================================================================
+        // 2. 惰性求值推导返回值类型 (Lazy Evaluation)
+        // ⚠️ 极其关键：必须使用没有 _t 的 std::invoke_result，配合 std::conditional_t
+        // 只有最终胜出的分支才会被 ::type，未胜出的分支即使参数不匹配也不会触发硬报错 (SFINAE 安全)
+        // =====================================================================
+        using RawRetTrait = std::conditional_t<
+            takes_both, std::invoke_result<Func, T, dk::CancellationToken>,
+            std::conditional_t<takes_t, std::invoke_result<Func, T>,
+                               std::conditional_t<takes_token, std::invoke_result<Func, dk::CancellationToken>,
+                                                  std::invoke_result<Func>>>>;
 
-        // 2. 剥离可能的 Future 嵌套
+        // 安全提取返回值类型
+        using RawRetType = typename RawRetTrait::type;
+        // 3. 剥离可能的 Future 嵌套
         constexpr bool returns_future = is_future<RawRetType>::value;
         using InnerType = typename detail::unwrap_future_type<RawRetType, returns_future>::type;
-        // 3. 定义安全的底层类型 (将 void 映射为 Unit)
+
+        // 4. 定义安全的底层类型 (将 void 映射为 Unit)
         using SafeInnerType = std::conditional_t<std::is_void_v<InnerType>, Unit, InnerType>;
-        // 创建下一个 Promise (底层永远使用 SafeInnerType)
+
+        // 创建下一个 Promise
         auto next_promise =
             std::make_shared<Promise<SafeInnerType>>(state_->dispatcher, state_->timeout_scheduler, state_->token);
-
         auto next_future = next_promise->get_future();
-
-        // 3. 包装业务 Callback
+        // 5. 包装业务 Callback
         std::function<void(T)> wrapped_cb = [cb = std::forward<Func>(cb), next_promise,
                                              current_state = this->state_](T val) mutable {
             try {
                 if (current_state->token && current_state->token->is_cancelled()) {
                     throw CancelledException();
                 }
-
+                // 🌟 完美的分发执行器
                 auto execute_cb = [&]() -> decltype(auto) {
-                    if constexpr (accepts_token) {
+                    // 按照优先级尝试调用 (优先全都要)
+                    if constexpr (takes_both) {
                         return cb(std::move(val), current_state->token.value_or(dk::CancellationToken{}));
-                    } else {
+                    } else if constexpr (takes_t) {
                         return cb(std::move(val));
+                    } else if constexpr (takes_token) {
+                        return cb(current_state->token.value_or(dk::CancellationToken{}));
+                    } else if constexpr (takes_none) {
+                        return cb();
                     }
                 };
-
-                // =========================================================
-                // ☢️ 终极防御墙：
-                // 1. 显式地在这个局部栈上创建一个普通的 shared_ptr。
-                // 2. 彻底切断 GCC 将其认作外层 lambda 类成员变量的念想。
-                // =========================================================
                 std::shared_ptr<Promise<SafeInnerType>> local_p = next_promise;
-
-                // 3. 内层 lambda 只能使用最普通的 [local_p] 捕获！【绝对不要带等号】
-                auto on_inner_void = [local_p](auto&&...) {
-                    local_p->resolve(Unit{});
-                    return Unit{};
-                };
-
-                auto on_inner_val = [local_p](auto&& inner_val) {
-                    local_p->resolve(std::forward<decltype(inner_val)>(inner_val));
-                    return inner_val;  // dummy return
-                };
-
                 auto on_inner_error = [local_p](std::exception_ptr e) { local_p->reject(e); };
-
-                // ---------------------------------------------------------
-                // 正常进入分支逻辑
-                // ---------------------------------------------------------
                 if constexpr (returns_future) {
                     auto inner_future = execute_cb();
-
                     if constexpr (std::is_void_v<InnerType>) {
+                        // 既然是 void，那就什么参数都不要接
+                        auto on_inner_void = [local_p]() {
+                            local_p->resolve(Unit{});
+                            return Unit{};
+                        };
                         inner_future.then(on_inner_void).catch_error(on_inner_error);
                     } else {
+                        // 既然是有返回值，就严格要求只能传入 InnerType
+                        auto on_inner_val = [local_p](InnerType inner_val) {
+                            local_p->resolve(std::move(inner_val));
+                            return inner_val;  // dummy return
+                        };
                         inner_future.then(on_inner_val).catch_error(on_inner_error);
                     }
                 } else {
@@ -314,13 +326,12 @@ class Future {
                 next_promise->reject(std::current_exception());
             }
         };
-
         std::function<void(std::exception_ptr)> wrapped_reject = [next_promise](std::exception_ptr e) {
             next_promise->reject(e);
         };
-
         register_callbacks(std::move(wrapped_cb), std::move(wrapped_reject));
-        return next_future;  // 对外返回的是 Future<SafeInnerType>
+
+        return next_future;
     }
 
     // ========================================================================
@@ -476,7 +487,7 @@ class Promise {
 
         if (is_pending) {
             reject(std::make_exception_ptr(
-                std::runtime_error("Broken Promise: Event was dropped without being resolved or rejected.")));
+                TraceableException("Broken Promise: Event was dropped without being resolved or rejected.")));
         }
     }
 

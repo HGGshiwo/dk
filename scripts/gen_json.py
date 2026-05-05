@@ -3,6 +3,7 @@ import os
 import re
 import sys  # 引入 sys 模块用于终止程序
 from pathlib import Path
+from textwrap import dedent
 
 
 def scan_and_generate(scan_dir, output_file, json_include_path):
@@ -58,12 +59,24 @@ def scan_and_generate(scan_dir, output_file, json_include_path):
         for match in struct_pattern.finditer(content):
             struct_name = match.group(1)
             vars = var_pattern.findall(match.group(2))
+            file_has_macro = True
             if vars:
                 args = ", ".join(vars)
                 generated_macros.append(
                     f"NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE({struct_name}, {args})"
                 )
-                file_has_macro = True
+            else:
+                # 空的结构体：手动生成 to_json 和 from_json
+                code = f"""
+                // Empty struct: {struct_name}
+                inline void to_json(nlohmann::json& nlohmann_json_j, const {struct_name}& nlohmann_json_t) {{
+                    nlohmann_json_j = nlohmann::json::object(); // 强制序列化为一个空的 JSON 对象 {{}}
+                }}
+                inline void from_json(const nlohmann::json& nlohmann_json_j, {struct_name}& nlohmann_json_t) {{
+                    // 什么都不需要做，接收到内容直接忽略即可
+                }}
+                // End of {struct_name}"""
+                generated_macros.append(dedent(code))
 
         if file_has_macro:
             included_files.add(file_path.resolve().as_posix())

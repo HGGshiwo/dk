@@ -78,6 +78,28 @@ class IEngine : public IAsyncRuntime {
         return wait_internal(std::move(wrapper), std::move(token));
     }
 
+    template <typename Visitor, typename FuncList>
+    struct SafeVisitor {
+        Visitor v;
+        template <typename EventType>
+        bool operator()(const EventType& specific_event) {
+            // 在 struct 内部展开，GCC 绝不会报错
+            if constexpr (meta_utils::can_handle<EventType, FuncList>::value) {
+                using RetType = decltype(v(specific_event));
+                // 动态适配返回值
+                if constexpr (std::is_convertible_v<RetType, bool>) {
+                    return v(specific_event);
+                } else {
+                    v(specific_event);
+                    return true;
+                }
+            } else {
+                // 不能处理的事件直接丢弃，绕过底层框架的 static_assert 毒药
+                return false;
+            }
+        }
+    };
+
     /*
         ## 为事件注册一个监听器，使用方法：(无论是监听一个事件，还是多个事件，API 完美统一，没有任何 nullopt 校验！)
         ```
@@ -93,25 +115,22 @@ class IEngine : public IAsyncRuntime {
     */
     template <typename... Funcs>
     Future<bool> wait_for(uint32_t timeout_ms, Funcs&&... funcs) {
-        std::shared_ptr<CancellationTokenSource> source = std::make_shared<CancellationTokenSource>();
+        auto source = std::make_shared<CancellationTokenSource>();
         auto token = source->get_token();
-
         if (timeout_ms > 0) source->cancel_after(timeout_ms, this);
 
-        // 内部自动帮你加 overloaded
-        auto visitor = overloaded{std::forward<Funcs>(funcs)...};
+        // 1. 提取用户的 lambda 类型列表（去除引用，防止悬垂）
+        using FuncList = meta_utils::TypeList<std::decay_t<Funcs>...>;
 
-        auto wrapper = [v = std::move(visitor), source](const Event& variant_event) -> bool {
-            return std::visit(
-                [&v](const auto& specific_event) -> bool {
-                    using EventType = std::decay_t<decltype(specific_event)>;
-                    if constexpr (std::is_invocable_r_v<bool, decltype(v), EventType>) {
-                        return v(specific_event);
-                    } else {
-                        return false;
-                    }
-                },
-                variant_event);
+        // 2. 把用户传进来的 func 缝合成常规的 overloaded
+        auto user_visitor = overloaded{std::forward<Funcs>(funcs)...};
+
+        // 3. 将它包装进我们刚刚定义的、绝对安全的 struct 中
+        SafeVisitor<decltype(user_visitor), FuncList> safe_v{std::move(user_visitor)};
+        // 4. 外层现在只剩下一个极其简单的 lambda，没有任何嵌套！GCC 绝对不会再崩溃。
+        auto wrapper = [v = std::move(safe_v), source](const Event& variant_event) mutable -> bool {
+            // 直接调用 std::visit，复杂的逻辑全在 SafeVisitor::operator() 里执行了
+            return std::visit(v, variant_event);
         };
 
         return wait_internal(std::move(wrapper), std::move(token));
@@ -192,7 +211,7 @@ class IEventHandler : public BaseInterface {
    public:
     ReturnType handle_event(const Event& event, Context& ctx) override {
         DerivedChild* child = static_cast<DerivedChild*>(this);
-
+        // 在这里打断点查看 dummy 的值
         return std::visit(
             [child, &ctx](const auto& e) -> ReturnType {
                 // 1. 探测业务类是否实现了这个事件的处理
@@ -301,16 +320,16 @@ class BaseEngine
    public:
     virtual ~BaseEngine() { stop(); }
     Context& get_context() { return ctx_; }
-
+    boost::asio::io_context& get_ioc() { return io_context_; }
     void add_listener(EventListenerPtr listener) { listeners_.push_back(listener); }
 
     std::thread::id get_thread_id() override { return event_thread_id_; }
 
     // 实现promise runtime
-    void post_future_task(std::function<void()> task) { boost::asio::post(io_context_, std::move(task)); }
+    void post_future_task(std::function<void()> task) override { boost::asio::post(io_context_, std::move(task)); }
 
     // 实现promise runtime
-    std::function<void()> set_future_timeout(uint32_t ms, std::function<void()> on_timeout) {
+    std::function<void()> set_future_timeout(uint32_t ms, std::function<void()> on_timeout) override {
         auto timer = std::make_shared<boost::asio::steady_timer>(io_context_);
         timer->expires_after(std::chrono::milliseconds(ms));
 
@@ -498,9 +517,8 @@ class BaseEngine
 // 适配器基类，绑定特定的引擎类型
 template <typename Event, typename Context, typename DerivedEngine>
 class BaseAdapter {
-    std::shared_ptr<BaseEngine<Event, Context, DerivedEngine>> engine_;
-
    protected:
+    std::shared_ptr<BaseEngine<Event, Context, DerivedEngine>> engine_;
     /*
      异步触发一个事件（通常是需要获取事件处理结果），底层是向boost::asio::post提交一个事件处理的任务，任务中如果调用AsyncEvent.resolve()则Future能够正确获取结果。
     */

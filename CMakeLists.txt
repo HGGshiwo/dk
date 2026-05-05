@@ -1,17 +1,30 @@
 cmake_minimum_required(VERSION 3.10)
 project(dk)
 
+add_library(asan_config INTERFACE)
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE "Debug")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -O0")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        # 全部用 INTERFACE 关键字绑定到 asan_config 这个虚拟库上
+        target_compile_options(asan_config INTERFACE 
+            -fsanitize=address
+            -fno-omit-frame-pointer
+        )
+        target_link_options(asan_config INTERFACE 
+            -fsanitize=address
+        )
+    endif()
 endif()
 
 set(THIRDPARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty")
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
-set(AUTO_JSON_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/scripts/gen_json.py")
+set_property(GLOBAL PROPERTY AUTO_JSON_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/scripts/gen_json.py")
 
 # 用法: dk_create_json_library(LIB_NAME <虚拟库名> SCAN_DIR <扫描目录>)
-function(dk_create_json_library LIB_NAME SCAN_DIR)
+function(dk_create_json_library LIB_NAME SCAN_DIR)    
     # 0. 安全检查：确保所需变量和环境存在
+    get_property(AUTO_JSON_SCRIPT GLOBAL PROPERTY AUTO_JSON_SCRIPT)
     if(NOT DEFINED AUTO_JSON_SCRIPT OR NOT EXISTS "${AUTO_JSON_SCRIPT}")
         message(FATAL_ERROR "[Framework] AUTO_JSON_SCRIPT 未定义或文件不存在: ${AUTO_JSON_SCRIPT}")
     endif()
@@ -60,28 +73,23 @@ function(dk_create_json_library LIB_NAME SCAN_DIR)
 
 endfunction()
 
-# ==========================================================
-# 核心技巧：创建一个专门用于开启 ASan 的“虚拟库” (INTERFACE 库)
-# ==========================================================
-add_library(asan_config INTERFACE)
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    # 全部用 INTERFACE 关键字绑定到 asan_config 这个虚拟库上
-    target_compile_options(asan_config INTERFACE 
-        -fsanitize=address
-        -fno-omit-frame-pointer
-    )
-    target_link_options(asan_config INTERFACE 
-        -fsanitize=address
-    )
-endif()
-
-
 # 1. 声明为一个纯头文件库 (INTERFACE)
 add_library(dk INTERFACE)
 target_include_directories(dk 
     INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include 
     ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty
 )
+# 寻找 Boost
+find_package(Boost REQUIRED)
+target_link_libraries(dk INTERFACE Boost::headers)
+# 4. (核心！) 根据不同操作系统，传递底层的系统链接要求给最终的使用者
+if(UNIX AND NOT APPLE)
+    # Linux 下 addr2line 模式需要链接 dl 库 (动态加载)
+    target_link_libraries(dk  INTERFACE dl)
+elseif(WIN32)
+    # Windows 下 windbg 模式需要 Dbgeng.lib
+    target_link_libraries(dk INTERFACE Dbgeng)
+endif()
 
 target_compile_features(dk INTERFACE cxx_std_17)
 

@@ -1,6 +1,9 @@
 #pragma once
 #include "./protocal.hpp"
 #include "./websocket.hpp"
+#include "dk/core.hpp"
+#include "dk/logger.hpp"
+#include "spdlog/spdlog.h"
 
 namespace dk {
 template <typename Event, typename Context, typename DerivedEngine>
@@ -13,8 +16,41 @@ class WebAdapter : public BaseAdapter<Event, Context, DerivedEngine> {
     std::map<std::pair<boost::beast::http::verb, std::string>, std::shared_ptr<IProtocolHandler<WebAdapter>>> routes_;
 
    public:
-    WebAdapter(net::io_context& ioc, unsigned short port, std::shared_ptr<DerivedEngine> engine)
-        : BaseAdapter<Event, Context, DerivedEngine>(engine), ioc_(ioc), acceptor_(ioc, {tcp::v4(), port}) {
+    WebAdapter(std::shared_ptr<DerivedEngine> engine, unsigned short port)
+        : BaseAdapter<Event, Context, DerivedEngine>(engine),
+          ioc_(engine->get_ioc()),
+          // 1. 初始化时不直接绑定，留到函数体内拆步进行
+          acceptor_(engine->get_ioc()) {
+        beast::error_code ec;
+        // 2. 打开 Acceptor
+        acceptor_.open(tcp::v4(), ec);
+        if (ec) {
+            std::string err = "Acceptor open error: " + ec.message();
+            spdlog::error("[WebAdapter Error] {}", err);
+            throw std::runtime_error(err);
+        }
+        // 3. 设置端口复用 (非常重要：防止服务器重启时报 Address already in use)
+        acceptor_.set_option(net::socket_base::reuse_address(true), ec);
+        if (ec) {
+            std::string err = "Acceptor set reuse_address error: " + ec.message();
+            spdlog::error("[WebAdapter Error] {}", err);
+            throw std::runtime_error(err);
+        }
+        // 4. 绑定端口
+        acceptor_.bind({tcp::v4(), port}, ec);
+        if (ec) {
+            std::string err = "Bind port " + std::to_string(port) + " failed: " + ec.message();
+            spdlog::error("[WebAdapter Error] {}", err);
+            throw std::runtime_error(err);  // 抛出异常，阻止程序带病启动
+        }
+        // 5. 开始监听
+        acceptor_.listen(net::socket_base::max_listen_connections, ec);
+        if (ec) {
+            std::string err = "Listen on port " + std::to_string(port) + " failed: " + ec.message();
+            spdlog::error("[WebAdapter Error] {}", err);
+            throw std::runtime_error(err);
+        }
+        spdlog::info("[WebAdapter Info] Successfully listening on port {}", port);
         do_accept();
     }
 
@@ -31,31 +67,70 @@ class WebAdapter : public BaseAdapter<Event, Context, DerivedEngine> {
         class HttpRouteHandler : public IProtocolHandler<WebAdapter> {
             WebAdapter* adapter_;
             uint32_t timeout_ms_;
+            std::string method_;
+            std::string path_;
+            void log_requst(const std::string& data) {
+                spdlog::info("send request: method={} path={} body={}", method_, path_, data);
+            }
+            void log_result(const std::string& data) {
+                spdlog::info("send request: method={} path={} body={}", method_, path_, data);
+            };
 
            public:
-            HttpRouteHandler(WebAdapter* adapter, uint32_t timeout_ms) : adapter_(adapter), timeout_ms_(timeout_ms) {}
+            HttpRouteHandler(WebAdapter* adapter, uint32_t timeout_ms, const std::string method, const std::string path)
+                : adapter_(adapter), timeout_ms_(timeout_ms), method_(method), path_(path) {}
 
             void handle(std::shared_ptr<HttpSession<WebAdapter>> session,
                         http::request<http::string_body> req) override {
                 try {
+                    log_requst(req.body());
                     SpecificEvent event = json::parse(req.body()).template get<SpecificEvent>();
                     auto future_res = adapter_->dispatch_async(event, timeout_ms_);
 
                     std::move(future_res)
-                        .then([session](SpecificResult result) {
+                        .then([session, this](SpecificResult result) {
                             json j_res = result;
-                            session->send_http_response(http::status::ok, j_res.dump(), "application/json");
+                            auto data = j_res.dump();
+
+                            session->send_http_response(http::status::ok, data, "application/json");
+                            this->log_result(data);
                         })
-                        .catch_error([session](std::exception_ptr e) {
-                            session->send_http_response(http::status::internal_server_error,
-                                                        "{\"error\":\"Internal Error\"}");
+                        .catch_error([session, this](std::exception_ptr e) {
+                            std::string err_msg = "Unknown internal error";
+                            std::string detail = "";
+                            // 1. 通过重新抛出来解析具体的异常信息
+                            try {
+                                if (e) {
+                                    std::rethrow_exception(e);
+                                }
+                            } catch (const TraceableException& ex) {
+                                err_msg = ex.what();
+                                detail = ex.format_exc();
+                            } catch (const std::exception& ex) {
+                                err_msg = ex.what();  // 获取具体的报错字符串
+                            } catch (...) {
+                                err_msg = "Unknown non-standard exception";
+                            }
+                            // 2. 构造安全的 JSON 响应（自动处理转义字符，防止 JSON 注入/破坏）
+                            json j_err;
+                            j_err["status"] = "error";
+                            j_err["msg"] = err_msg;
+                            j_err["detail"] = detail;
+                            // 3. 发送带具体错误信息的 HTTP响应
+                            auto data = j_err.dump();
+                            session->send_http_response(http::status::ok, data);
+                            this->log_result(data);
                         });
                 } catch (const std::exception& ex) {
                     session->send_http_response(http::status::bad_request, "{\"error\":\"Bad Request\"}");
+                    log_result(ex.what());
                 }
             }
         };
-        register_handler(method, path, std::make_shared<HttpRouteHandler>(this, timeout_ms));
+
+        auto method_str = std::string(boost::beast::http::to_string(method));
+        register_handler(method, path, std::make_shared<HttpRouteHandler>(this, timeout_ms, method_str, path));
+        spdlog::info("WebAdapter register route: method={} path={}", method_str, path);
     }
 
     // --- 3. 新增的 WebSocket 路由 API ---
@@ -92,7 +167,16 @@ class WebAdapter : public BaseAdapter<Event, Context, DerivedEngine> {
         acceptor_.async_accept(net::make_strand(ioc_), [this](beast::error_code ec, tcp::socket socket) {
             if (!ec) {
                 std::make_shared<HttpSession<WebAdapter>>(std::move(socket), this)->start();
+            } else {
+                // 增加运行时的 accept 错误提示
+                spdlog::error("[WebAdapter Error] async_accept failed: {}", ec.message());
+
+                // 如果是致命错误（比如 acceptor 被关闭），应该停止 accept 循环
+                if (ec == net::error::operation_aborted || ec == net::error::bad_descriptor) {
+                    return;
+                }
             }
+            // 只要不是致命错误，继续接收下一个连接
             do_accept();
         });
     }
