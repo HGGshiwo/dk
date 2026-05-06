@@ -60,6 +60,7 @@ class CancellationToken {
     bool is_cancelled() const { return cancelled_ && cancelled_->load(std::memory_order_relaxed); }
 };
 
+/* 不需要强制保留指针，非常安全 */
 class CancellationTokenSource {
     std::shared_ptr<std::atomic<bool>> cancelled_;
 

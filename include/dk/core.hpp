@@ -59,20 +59,18 @@ class IEngine : public IAsyncRuntime {
 
     template <typename... Funcs>
     Future<bool> wait(CancellationToken token, Funcs&&... funcs) {
-        // 内部自动帮你加 overloaded
-        auto visitor = overloaded{std::forward<Funcs>(funcs)...};
+        // 1. 提取用户的 lambda 类型列表（去除引用，防止悬垂）
+        using FuncList = meta_utils::TypeList<std::decay_t<Funcs>...>;
 
-        auto wrapper = [v = std::move(visitor)](const Event& variant_event) -> bool {
-            return std::visit(
-                [&v](const auto& specific_event) -> bool {
-                    using EventType = std::decay_t<decltype(specific_event)>;
-                    if constexpr (std::is_invocable_r_v<bool, decltype(v), EventType>) {
-                        return v(specific_event);
-                    } else {
-                        return false;
-                    }
-                },
-                variant_event);
+        // 2. 把用户传进来的 func 缝合成常规的 overloaded
+        auto user_visitor = overloaded{std::forward<Funcs>(funcs)...};
+
+        // 3. 将它包装进我们刚刚定义的、绝对安全的 struct 中
+        SafeVisitor<decltype(user_visitor), FuncList> safe_v{std::move(user_visitor)};
+        // 4. 外层现在只剩下一个极其简单的 lambda，没有任何嵌套！GCC 绝对不会再崩溃。
+        auto wrapper = [v = std::move(safe_v)](const Event& variant_event) mutable -> bool {
+            // 直接调用 std::visit，复杂的逻辑全在 SafeVisitor::operator() 里执行了
+            return std::visit(v, variant_event);
         };
 
         return wait_internal(std::move(wrapper), std::move(token));
@@ -118,22 +116,7 @@ class IEngine : public IAsyncRuntime {
         auto source = std::make_shared<CancellationTokenSource>();
         auto token = source->get_token();
         if (timeout_ms > 0) source->cancel_after(timeout_ms, this);
-
-        // 1. 提取用户的 lambda 类型列表（去除引用，防止悬垂）
-        using FuncList = meta_utils::TypeList<std::decay_t<Funcs>...>;
-
-        // 2. 把用户传进来的 func 缝合成常规的 overloaded
-        auto user_visitor = overloaded{std::forward<Funcs>(funcs)...};
-
-        // 3. 将它包装进我们刚刚定义的、绝对安全的 struct 中
-        SafeVisitor<decltype(user_visitor), FuncList> safe_v{std::move(user_visitor)};
-        // 4. 外层现在只剩下一个极其简单的 lambda，没有任何嵌套！GCC 绝对不会再崩溃。
-        auto wrapper = [v = std::move(safe_v), source](const Event& variant_event) mutable -> bool {
-            // 直接调用 std::visit，复杂的逻辑全在 SafeVisitor::operator() 里执行了
-            return std::visit(v, variant_event);
-        };
-
-        return wait_internal(std::move(wrapper), std::move(token));
+        return wait(token, std::forward<Funcs>(funcs)...);
     }
 
     // 派发内部高优事件（微队列）
