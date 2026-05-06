@@ -84,7 +84,8 @@ class WebAdapter : public BaseAdapter<Event, Context, DerivedEngine> {
                         http::request<http::string_body> req) override {
                 try {
                     log_requst(req.body());
-                    SpecificEvent event = json::parse(req.body()).template get<SpecificEvent>();
+                    SpecificEvent event =
+                        req.body().empty() ? SpecificEvent{} : json::parse(req.body()).template get<SpecificEvent>();
                     auto future_res = adapter_->dispatch_async(event, timeout_ms_);
 
                     std::move(future_res)
