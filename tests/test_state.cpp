@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 
-#include "dk/core.hpp"  // 替换为你的框架头文件路径
+#include "dk/engine.hpp"  // 替换为你的框架头文件路径
 
 // ================== 1. 测试基础结构定义 ==================
 
@@ -17,7 +17,7 @@ using TestEvent =
     std::variant<dk::TickEvent, dk::EnterEvent, dk::ExitEvent, EvPing, EvPong, EvTriggerInternal, EvAsyncQuery>;
 
 // 测试上下文，用于记录测试结果
-struct TestContext : dk::BaseContext<TestEvent, TestContext> {
+struct TestContext : dk::BaseContext<TestContext> {
     int ping_count = 0;
     std::vector<std::string> log;  // 记录执行顺序
     std::mutex log_mtx;
@@ -25,9 +25,11 @@ struct TestContext : dk::BaseContext<TestEvent, TestContext> {
 
 // ================== 2. 测试引擎与状态定义 ==================
 
-class TestEngine : public dk::BaseEngine<TestEvent, TestContext, TestEngine> {
+class TestEngine : public dk::BaseEngine<TestContext, TestEngine> {
    public:
     // 测试全局 Hook：记录进出状态
+    using AllowedEvent = std::tuple<dk::EnterEvent, dk::ExitEvent>;
+
     void on_event(const dk::EnterEvent& e, TestContext& ctx) {
         std::lock_guard<std::mutex> lock(ctx.log_mtx);
         ctx.log.push_back(std::string("ENTER_") + e.state_name);
@@ -38,58 +40,61 @@ class TestEngine : public dk::BaseEngine<TestEvent, TestContext, TestEngine> {
     }
 };
 
-using StatePtr = std::shared_ptr<dk::IState<TestEvent, TestContext>>;
-
-class StateA : public dk::PureState<TestEvent, TestContext, StateA> {
+class StateA : public dk::BaseState<TestContext, StateA, void> {
    public:
+    using StateAction = dk::StateAction<TestContext>;
+    using AllowedEvent = std::tuple<EvPing, EvAsyncQuery, EvTriggerInternal>;
     // 测试流转
-    StatePtr on_event(const EvPing&, TestContext& ctx);
+    StateAction on_event(const EvPing&, TestContext& ctx);
 
     // 测试异步事件处理
-    StatePtr on_event(const EvAsyncQuery& e, TestContext& ctx);
+    StateAction on_event(const EvAsyncQuery& e, TestContext& ctx);
 
     // 测试微队列派发
-    StatePtr on_event(const EvTriggerInternal&, TestContext& ctx);
+    StateAction on_event(const EvTriggerInternal&, TestContext& ctx);
 
     // 给 State 类返回一个简化的名字，方便看 log
-    const std::string name() const override { return "StateA"; }
+    std::string name() const override { return "StateA"; }
 };
 
-class StateB : public dk::PureState<TestEvent, TestContext, StateB> {
+class StateB : public dk::BaseState<TestContext, StateB, void> {
    public:
-    StatePtr on_event(const EvPong&, TestContext& ctx);
-    const std::string name() const override { return "StateB"; }
+    using StateAction = dk::StateAction<TestContext>;
+    using AllowedEvent = std::tuple<EvPong>;
+
+    StateAction on_event(const EvPong&, TestContext& ctx);
+    std::string name() const override { return "StateB"; }
 };
 
 // 测试流转
-StatePtr StateA::on_event(const EvPing&, TestContext& ctx) {
+StateA::StateAction StateA::on_event(const EvPing&, TestContext& ctx) {
     std::lock_guard<std::mutex> lock(ctx.log_mtx);
     ctx.ping_count++;
     ctx.log.push_back("Ping_Handled");
-    return StateB::instance();
+    return step<StateB>();
 }
 
 // 测试异步事件处理
-StatePtr StateA::on_event(const EvAsyncQuery& e, TestContext& ctx) {
+StateA::StateAction StateA::on_event(const EvAsyncQuery& e, TestContext& ctx) {
     std::lock_guard<std::mutex> lock(ctx.log_mtx);
     ctx.log.push_back("Async_Handled");
     e.resolve(42);  // 返回异步结果
-    return nullptr;
+    return StateA::StateAction::handled();
 }
 
 // 测试微队列派发
-StatePtr StateA::on_event(const EvTriggerInternal&, TestContext& ctx) {
+StateA::StateAction StateA::on_event(const EvTriggerInternal&, TestContext& ctx) {
     std::lock_guard<std::mutex> lock(ctx.log_mtx);
     ctx.log.push_back("Trigger_Macro");
     // 投递微队列（高优）
     ctx.engine->dispatch_internal(EvPing{});
-    return nullptr;
+    return StateA::StateAction::handled();
 }
 
-StatePtr StateB::on_event(const EvPong&, TestContext& ctx) {
+StateB::StateAction StateB::on_event(const EvPong&, TestContext& ctx) {
     std::lock_guard<std::mutex> lock(ctx.log_mtx);
     ctx.log.push_back("Pong_Handled");
-    return StateA::instance();
+    return step<StateA>();
 }
 
 // ================== 3. 测试用例 ==================
@@ -101,7 +106,7 @@ class DkFrameworkTest : public ::testing::Test {
     void SetUp() override {
         engine = std::make_shared<TestEngine>();
         // 启动引擎，初始状态为 StateA，不触发定时器干扰测试
-        engine->start(StateA::instance(), std::chrono::hours(1));
+        engine->start<StateA>(std::chrono::hours(1));
     }
 
     void TearDown() override { engine->stop(); }
@@ -172,15 +177,6 @@ TEST_F(DkFrameworkTest, AsyncEventUnhandledRejection) {
 
     // 状态机无法处理，Event 对象被析构，应该自动 Reject 抛出 runtime_error
     EXPECT_THROW({ fut.get(); }, std::runtime_error);
-}
-
-// 测试 5：PureState 内存复用 (零开销切换)
-TEST_F(DkFrameworkTest, PureStateSingletonMemory) {
-    auto state1 = StateA::instance();
-    auto state2 = StateA::instance();
-
-    // 验证两次获取的实例是否指向同一个静态内存地址
-    EXPECT_EQ(state1.get(), state2.get()) << "PureState failed to return singleton!";
 }
 
 int main(int argc, char** argv) {

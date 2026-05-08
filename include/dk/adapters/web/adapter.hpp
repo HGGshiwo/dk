@@ -1,13 +1,13 @@
 #pragma once
 #include "./protocal.hpp"
 #include "./websocket.hpp"
-#include "dk/core.hpp"
+#include "dk/adapters/base.hpp"
 #include "dk/logger.hpp"
 #include "spdlog/spdlog.h"
 
 namespace dk {
-template <typename Event, typename Context, typename DerivedEngine>
-class WebAdapter : public BaseAdapter<Event, Context, DerivedEngine> {
+template <typename Context, typename DerivedEngine>
+class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
    private:
     net::io_context& ioc_;
     tcp::acceptor acceptor_;
@@ -17,7 +17,7 @@ class WebAdapter : public BaseAdapter<Event, Context, DerivedEngine> {
 
    public:
     WebAdapter(std::shared_ptr<DerivedEngine> engine, unsigned short port)
-        : BaseAdapter<Event, Context, DerivedEngine>(engine),
+        : BaseAdapter<Context, DerivedEngine>(engine),
           ioc_(engine->get_ioc()),
           // 1. 初始化时不直接绑定，留到函数体内拆步进行
           acceptor_(engine->get_ioc()) {
@@ -70,7 +70,7 @@ class WebAdapter : public BaseAdapter<Event, Context, DerivedEngine> {
             std::string method_;
             std::string path_;
             void log_requst(const std::string& data) {
-                spdlog::info("send request: method={} path={} body={}", method_, path_, data);
+                spdlog::info("receive request: method={} path={} body={}", method_, path_, data);
             }
             void log_result(const std::string& data) {
                 spdlog::info("send request: method={} path={} body={}", method_, path_, data);

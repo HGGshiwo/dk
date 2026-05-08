@@ -63,7 +63,7 @@
 
 ### 使用示例
 ```cpp
-#include "dk/core.hpp" 
+#include "dk/engine.hpp" 
 
 // 1. 定义业务事件与 Context
 struct MyEvent { int val; };

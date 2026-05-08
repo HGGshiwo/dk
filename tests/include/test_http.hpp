@@ -13,7 +13,7 @@
 // 包含自动生成的 JSON 宏头文件 (文档中提到的)
 
 #include "dk/adapters/web.hpp"
-#include "dk/core.hpp"
+#include "dk/engine.hpp"
 #include "dk/future.hpp"
 
 // ============================================================================

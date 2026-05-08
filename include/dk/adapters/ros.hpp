@@ -4,6 +4,7 @@
 #include <boost/shared_ptr.hpp>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "../core.hpp"
@@ -40,12 +41,8 @@ class RosAdapter : public dk::BaseAdapter<EventType, Context, EngineType> {
         // 假设 ctx 是类的成员变量，或者你可以从某个地方获取到它
         auto sub = nh_.subscribe<RosMsgType>(
             topic_name, 1, [this, cb = std::forward<F>(cb)](const typename RosMsgType::ConstPtr& data) -> void {
-                static_assert(std::is_convertible_v<const typename RosMsgType::ConstPtr&, ExactType>,
-                              "\n\n=======================================================\n"
-                              "[DANKONG ERROR] 回调函数参数类型错误！\n"
-                              "ROS 底层传递的是智能指针，而你的 Lambda 期望的是普通对象。\n"
-                              "请将你的 Lambda 参数改为: 'const auto&' 或 'const MsgType::ConstPtr&'\n"
-                              "=======================================================\n\n");
+                static_assert(std::is_convertible<const typename RosMsgType::ConstPtr&, ExactType>::value,
+                              "Lambda arguments has wrong type: change MsgType to const MsgType::ConstPtr& instead!");
                 cb(data, this->engine_->get_context());
             });
 
@@ -78,11 +75,7 @@ class RosAdapter : public dk::BaseAdapter<EventType, Context, EngineType> {
             topic_name, 10,
             [this, translator = std::forward<Callable>(translator)](const typename RosMsgType::ConstPtr& msg) {
                 static_assert(std::is_invocable_v<decltype(translator), decltype(msg)>,
-                              "\n\n=======================================================\n"
-                              "[DANKONG ERROR] 回调函数参数类型错误！\n"
-                              "ROS 底层传递的是智能指针，而你的 Lambda 期望的是普通对象。\n"
-                              "请将你的 Lambda 参数改为: 'const auto&' 或 'const MsgType::ConstPtr&'\n"
-                              "=======================================================\n\n");
+                              "Lambda arguments has wrong type: change MsgType to const MsgType::ConstPtr& instead!");
                 // 显式指定 EventType，确保类型安全
                 ReturnType e = translator(msg);
 

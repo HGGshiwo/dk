@@ -103,41 +103,43 @@ template <typename T>
 class thread_safe {
    private:
     T data_;
-    mutable std::shared_mutex mtx_;  // 替换为读写锁
+    mutable std::shared_mutex mtx_;
 
    public:
     template <typename... Args>
     thread_safe(Args&&... args) : data_(std::forward<Args>(args)...) {}
-
     // ==========================================
     // 接口 1：写操作（独占锁）
-    // 传递 T&，允许修改数据
+    // 强制要求传递 T& (或 auto&)，否则直接编译报错！
     // ==========================================
     template <typename Func>
     decltype(auto) write(Func&& func) {
-        std::unique_lock<std::shared_mutex> lock(mtx_);  // 独占锁
-        return func(data_);                              // 传递可变引用
+        // 1. 确保函数可以用 T&（左值引用）调用
+        static_assert(std::is_invocable_v<Func, T&>, "write callback error: Argument must be T&!");
+        // 2. 核心魔法：确保函数【不能】用 T（右值）调用
+        // 这完美拦截了传值拷贝 `[](T x)` 和常引用 `[](const T& x)`
+        static_assert(!std::is_invocable_v<Func, T>, "write callback error: Argument must be T& or auto&!");
+        std::unique_lock<std::shared_mutex> lock(mtx_);
+        // 完美转发传入的 callable 对象
+        return std::forward<Func>(func)(data_);
     }
-
     // ==========================================
     // 接口 2：读操作（共享锁）
-    // 传递 const T&，编译器强制禁止修改！
     // ==========================================
     template <typename Func>
     decltype(auto) read(Func&& func) const {
-        std::shared_lock<std::shared_mutex> lock(mtx_);  // 共享锁
-        return func(data_);                              // 传递常量引用
+        // 提供友好的编译期错误提示
+        static_assert(std::is_invocable_v<Func, const T&>, "read callback error: Argument must be const T&!");
+        std::shared_lock<std::shared_mutex> lock(mtx_);
+        return std::forward<Func>(func)(data_);
     }
-
     T get() const {
-        std::unique_lock<std::shared_mutex> lock(mtx_);
+        std::shared_lock<std::shared_mutex> lock(mtx_);  // 注意：get 应该用共享锁(读锁)
         return data_;
     }
-
     void set(T data) {
         std::unique_lock<std::shared_mutex> lock(mtx_);
-        ;
-        data_ = data;
+        data_ = std::move(data);  // 优化：使用 std::move 减少一次拷贝
     }
 };
 }  // namespace dk

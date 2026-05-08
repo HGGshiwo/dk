@@ -11,10 +11,7 @@ using tcp = net::ip::tcp;
 // ============================================================================
 // 2. 定义事件合集与上下文 (Engine 所需)
 // ============================================================================
-
-using AppEvent = std::variant<dk::TickEvent, dk::EnterEvent, dk::ExitEvent, AsyncLoginEvent>;
-
-struct AppContext : dk::BaseContext<AppEvent, AppContext> {
+struct AppContext : dk::BaseContext<AppContext> {
     int trigger_count = 0;
 };
 
@@ -22,10 +19,13 @@ struct AppContext : dk::BaseContext<AppEvent, AppContext> {
 // 3. 定义状态机与 Engine
 // ============================================================================
 
-class DummyState : public dk::PureState<AppEvent, AppContext, DummyState> {
+class DummyState : public dk::BaseState<AppContext, DummyState, void> {
    public:
+    using AllowedEvents = std::tuple<AsyncLoginEvent>;
+    using StateAction = dk::StateAction<AppContext>;
+
     // 处理 HTTP 路由转发过来的 AsyncLoginEvent
-    std::shared_ptr<dk::IState<AppEvent, AppContext>> on_event(const AsyncLoginEvent& e, AppContext& ctx) {
+    StateAction on_event(const AsyncLoginEvent& e, AppContext& ctx) {
         TestLoginResult result;
         if (e.username == "admin" && e.password == "123456") {
             result.success = true;
@@ -35,11 +35,11 @@ class DummyState : public dk::PureState<AppEvent, AppContext, DummyState> {
         }
         // 唤醒框架底层的 HTTP 响应处理
         e.resolve(result);
-        return nullptr;
+        return StateAction::handled();
     }
 };
 
-class TestEngine : public dk::BaseEngine<AppEvent, AppContext, TestEngine> {};
+class TestEngine : public dk::BaseEngine<AppContext, TestEngine> {};
 
 // ============================================================================
 // 4. GTest 测试夹具 (真实网络集成测试)
@@ -50,7 +50,7 @@ class WebAdapterRealTestSuite : public ::testing::Test {
     net::io_context ioc;
     std::shared_ptr<TestEngine> engine;
     // 使用文档中提到的真实 WebAdapter
-    std::shared_ptr<dk::WebAdapter<AppEvent, AppContext, TestEngine>> adapter;
+    std::shared_ptr<dk::WebAdapter<AppContext, TestEngine>> adapter;
     std::thread ioc_thread;
 
     const short TEST_PORT = 18080;
@@ -60,7 +60,7 @@ class WebAdapterRealTestSuite : public ::testing::Test {
         engine = std::make_shared<TestEngine>();
 
         // 初始化真实的 WebAdapter
-        adapter = std::make_shared<dk::WebAdapter<AppEvent, AppContext, TestEngine>>(ioc, TEST_PORT, engine);
+        adapter = std::make_shared<dk::WebAdapter<AppContext, TestEngine>>(engine, TEST_PORT);
 
         // 注册 HTTP 路由
         adapter->register_route<AsyncLoginEvent, TestLoginResult>(http::verb::post, "/api/login");
@@ -79,7 +79,7 @@ class WebAdapterRealTestSuite : public ::testing::Test {
         adapter->register_ws_route("/ws/test", std::move(ws_endpoint));
 
         // 启动引擎
-        engine->start(DummyState::instance(), std::chrono::milliseconds(100));
+        engine->start<DummyState>(std::chrono::milliseconds(100));
 
         // 在后台线程启动 ASIO 事件循环，开始监听真实的 Socket 请求
         ioc_thread = std::thread([this]() {
