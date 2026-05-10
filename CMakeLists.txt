@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.12)
 project(dk)
 
 add_library(asan_config INTERFACE)
@@ -81,7 +81,9 @@ target_include_directories(dk
 )
 # 寻找 Boost
 find_package(Boost REQUIRED)
-target_link_libraries(dk INTERFACE Boost::headers)
+find_package(yaml-cpp REQUIRED)
+
+target_link_libraries(dk INTERFACE Boost::headers yaml-cpp)
 # 4. (核心！) 根据不同操作系统，传递底层的系统链接要求给最终的使用者
 if(UNIX AND NOT APPLE)
     # Linux 下 addr2line 模式需要链接 dl 库 (动态加载)

@@ -1,0 +1,143 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 全局样式重置，适配移动端 */
+/* 全局样式重置 + PC端居中撑满核心配置 */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+/* 根容器：PC端最大宽度1400px（适配主流2K/1080P屏）、水平居中、撑满视口高度 */
+#root {
+  max-width: 1400px;
+  width: 100%;
+  margin: 0 auto;
+  min-height: 100vh;
+  padding: 16px;
+}
+body {
+  background: #f5f5f5;
+  display: flex;
+  justify-content: center;
+  min-height: 100vh;
+  /* 去掉原body的padding，移到#root，统一容器控制 */
+  padding: 0;
+}
+
+/* 美化横向滚动条（移动端状态组件用） */
+::-webkit-scrollbar {
+  height: 6px;
+  width: 6px;
+}
+::-webkit-scrollbar-thumb {
+  background: #d9d9d9;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-track {
+  background: #fafafa;
+  border-radius: 3px;
+}
+
+/* 自定义类：移动端横向滚动容器 */
+.scroll-x-container {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding-bottom: 8px; /* 给滚动条留空间 */
+  scroll-snap-type: x mandatory; /* 滑动吸附，体验更好 */
+}
+.scroll-x-item {
+  flex: 0 0 auto; /* 固定宽度，不挤压 */
+  scroll-snap-align: start; /* 吸附到起始位置 */
+  width: 160px; /* 移动端状态卡片固定宽度，保证看清 */
+}
+
+.btn {
+    padding: 12px 24px;
+    border: none;
+    border-radius: 6px;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 120px;
+}
+
+.btn-primary {
+    background-color: #3498db;
+    color: white;
+}
+
+.btn-primary:hover {
+    background-color: #2980b9;
+}
+
+.btn-secondary {
+    background-color: #95a5a6;
+    color: white;
+}
+
+.btn-secondary:hover {
+    background-color: #7f8c8d;
+}
+
+.btn-warning {
+    background-color: #e74c3c;
+    color: white;
+}
+
+.btn-warning:hover {
+    background-color: #c0392b;
+}
+
+.btn-success {
+    background-color: #2ecc71;
+    color: white;
+    width: 100%;
+    margin-top: 15px;
+}
+
+.btn-success:hover {
+    background-color: #27ae60;
+}
+
+.btn-edit {
+    background-color: #f39c12;
+    color: white;
+    min-width: 100px;
+}
+
+.btn-edit:hover {
+    background-color: #d68910;
+}
+
+.btn-confirm {
+    background-color: #2ecc71;
+    color: white;
+    min-width: 100px;
+}
+
+.btn-confirm:hover {
+    background-color: #27ae60;
+}
+
+.btn-cancel {
+    background-color: #95a5a6;
+    color: white;
+    min-width: 100px;
+}
+
+.btn-cancel:hover {
+    background-color: #7f8c8d;
+}
+
+.btn:disabled {
+    background-color: #ecf0f1;
+    color: #bdc3c7;
+    cursor: not-allowed;
+}

@@ -105,6 +105,9 @@ class IEngine : public IAsyncRuntime {
     // 获取当前的活跃路径 (从根到叶)
     virtual const std::vector<std::shared_ptr<IState<Context>>>& get_active_states() const = 0;
 
+    // 获取叶子节点状态名字
+    virtual const std::string get_state_name() = 0;
+
     // === 适配 std::any 的新一代多重 Lambda 等待黑魔法 ===
     template <typename... Funcs>
     Future<bool> wait(CancellationToken token, Funcs&&... funcs) {
@@ -315,6 +318,13 @@ class BaseEngine : public IEventHandler<IEngine<Context>, Context, void, Derived
 
     const std::vector<StatePtr>& get_active_states() const override { return active_states_; }
 
+    const std::string get_state_name() override {
+        if (!active_states_.empty()) {
+            return (*active_states_.back()).name();
+        }
+        return "UNKNOWN";
+    }
+
     Context& get_context() override { return ctx_; }
 
     boost::asio::io_context& get_ioc() { return io_context_; }
@@ -419,8 +429,13 @@ class BaseEngine : public IEventHandler<IEngine<Context>, Context, void, Derived
 
                 init_promise.set_value();
                 io_context_.run();
+            } catch (const std::exception& e) {
+                running_ = false;
+                std::cout << "[Engine]: fatal error: " << e.what() << std::endl;
+                init_promise.set_exception(std::current_exception());
             } catch (...) {
                 running_ = false;
+                std::cout << "[Engine]: Unknown exception type without what() interface.\n";
                 init_promise.set_exception(std::current_exception());
             }
         });

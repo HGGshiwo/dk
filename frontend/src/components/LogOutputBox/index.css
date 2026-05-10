@@ -1,0 +1,151 @@
+/* 适配灰色全局背景：组件外层白色背景+浅阴影，与全局背景强分离 */
+.log-output-box {
+  width: 100%;
+  max-width: 1400px;
+  margin: 16px 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 20px;
+  box-sizing: border-box;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  background-color: #ffffff;
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05);
+}
+
+/* 头部：分隔线加深，文字更醒目 */
+.log-box-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e2e8f0;
+}
+.log-box-header h3 {
+  margin: 0;
+  font-size: 18px;
+  color: #1e293b;
+  font-weight: 600;
+}
+
+/* 类型选择区：间距优化，标签文字加深 */
+.log-type-selector {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+.selector-label {
+  color: #334155;
+  /* font-size: 14px; */
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* 日志列表核心：纯白色背景+圆角，与组件外层呼应，边框强化 */
+.log-list {
+  width: 100%;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  overflow-y: auto;
+  box-sizing: border-box;
+  background-color: #ffffff;
+  outline: none;
+  /* 聚焦时轻量边框，提示可交互 */
+  &:focus {
+    border-color: #94a3b8;
+  }
+}
+
+/* 空日志：浅灰色文字，居中更优雅 */
+.empty-log {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  color: #94a3b8;
+  /* font-size: 14px; */
+  font-weight: 500;
+}
+
+/* 单条日志：分隔线加深，hover高亮（关键优化），间距放大 */
+.log-item {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 20px;
+  border-bottom: 1px solid #e2e8f0;
+  /* font-size: 14px; */
+  line-height: 1.7;
+  /* 鼠标悬浮高亮，提升可读性，区分相邻日志 */
+  &:hover {
+    background-color: #f8fafc;
+  }
+  /* 最后一条日志移除分隔线 */
+  &:last-child {
+    border-bottom: none;
+  }
+}
+
+/* 日志类型标签：圆角放大，边框加粗，内边距增加，更醒目 */
+.log-type-tag {
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+
+/* 日志时间：固定浅灰，增加最小宽度，布局更稳定 */
+.log-time {
+  color: #64748b;
+  font-size: 14px;
+  white-space: nowrap;
+  min-width: 190px;
+  font-weight: 500;
+}
+
+/* 日志内容：深灰色主文字，对比度拉满，换行优化 */
+.log-content {
+  flex: 1;
+  color: #1e293b;
+  font-weight: 500;
+  text-wrap: nowrap;
+}
+
+/* 滚动条重新设计：适配白色背景，更细腻 */
+.log-list::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.log-list::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background-color: #cbd5e1;
+  &:hover {
+    background-color: #94a3b8;
+  }
+}
+.log-list::-webkit-scrollbar-track {
+  background-color: #f8fafc;
+  border-radius: 4px;
+}
+
+/* 响应式适配：移动端优化间距和最小宽度 */
+@media (max-width: 768px) {
+  .log-output-box {
+    padding: 16px;
+  }
+  .log-time {
+    min-width: 140px;
+  }
+  .log-type-selector {
+    gap: 12px;
+  }
+  .log-item {
+    padding: 10px 16px;
+    gap: 12px;
+  }
+}
