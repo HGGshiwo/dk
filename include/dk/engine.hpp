@@ -4,6 +4,7 @@
 #include <boost/asio.hpp>
 #include <chrono>
 #include <condition_variable>
+#include <exception>
 #include <functional>
 #include <future>
 #include <iostream>
@@ -85,9 +86,21 @@ class IEngine : public IAsyncRuntime {
    public:
     virtual ~IEngine() = default;
 
+    virtual Context& get_context() = 0;
+
     virtual void handle_event(const std::any& event, Context& ctx) = 0;
 
     virtual void dispatch_internal(std::any e) = 0;
+
+    virtual void step_internal(const StateAction<Context>& action) = 0;
+
+    template <typename StateType, typename... Args>
+    void step(Args&&... args) {
+        // 利用 StateAction 的静态工厂完成“类型擦除”
+        StateAction<Context> action = StateAction<Context>::template step<StateType>(std::forward<Args>(args)...);
+        // 调用子类实现的非模板虚函数
+        this->step_internal(action);
+    }
 
     // 获取当前的活跃路径 (从根到叶)
     virtual const std::vector<std::shared_ptr<IState<Context>>>& get_active_states() const = 0;
@@ -107,6 +120,7 @@ class IEngine : public IAsyncRuntime {
         };
         return wait_internal(std::move(any_wrapper), std::move(token));
     }
+
     template <typename... Funcs>
     Future<bool> wait_for(uint32_t timeout_ms, Funcs&&... funcs) {
         auto source = std::make_shared<CancellationTokenSource>();
@@ -133,6 +147,9 @@ template <typename ResultT>
 struct AsyncEvent {
     using ReturnType = ResultT;
     mutable std::shared_ptr<Promise<ResultT>> promise_;
+
+    virtual ~AsyncEvent<ResultT>() = default;
+
     // 用户梦寐以求的 API：直接调用 e.resolve()!
     void resolve(ResultT val) const {
         if (promise_) {
@@ -152,6 +169,8 @@ struct AsyncEvent {
             promise_->reject(std::make_exception_ptr(std::runtime_error(error_msg)));
         }
     }
+
+    const bool is_settled() const { return promise_ == nullptr || promise_->state() != PromiseState::PENDING; }
 
     // 辅助方法：判断外界是否在等待
     bool is_awaited() const { return promise_ != nullptr; }
@@ -198,51 +217,45 @@ class BaseEngine : public IEventHandler<IEngine<Context>, Context, void, Derived
    private:
     // LCA (最近公共祖先) 状态树跳转计算
     void execute_transition(const StateAction<Context>& action) {
-        if (step_call_level_ != 0) {
-            throw std::logic_error("FATAL: Cannot change state when a transition is already in progress!");
+        try {
+            if (step_call_level_ != 0) {
+                throw std::logic_error("FATAL: Cannot change state when a transition is already in progress!");
+            }
+            step_call_level_++;
+            std::vector<StatePtr> new_path;
+            // 【修改点 4】：将当前的 active_states_ 传给 Builder
+            action.path_builder(new_path, active_states_);
+            // 2. 寻找新旧路径的最近公共祖先 (LCA)
+            size_t lca_idx = 0;
+            size_t min_len = std::min(active_states_.size(), new_path.size());
+
+            // 【修改点 5】：直接使用指针比较，因为如果名字一致，Builder 直接推入了相同的指针
+            while (lca_idx < min_len && active_states_[lca_idx] == new_path[lca_idx]) {
+                lca_idx++;
+            }
+            std::string prev_leaf = active_states_.empty() ? "UNKNOWN" : active_states_.back()->name();
+            // 3. 从旧叶子节点往上退出，直到 LCA 的子节点
+            for (size_t i = active_states_.size(); i > lca_idx; --i) {
+                auto s = active_states_[i - 1];
+                s->on_exit(ctx_);
+                process_internal(std::make_any<ExitEvent>(ExitEvent{s->name()}));
+            }
+            // 4. 从 LCA 的子节点往下进入，直到新叶子节点
+            for (size_t i = lca_idx; i < new_path.size(); ++i) {
+                auto s = new_path[i];
+                s->parent_ptr = i >= 1 ? new_path[i - 1].get() : nullptr;  // 修改为.get()，因为这里是智能指针
+                process_internal(std::make_any<EnterEvent>(EnterEvent{s->name()}));
+                s->on_enter(ctx_);
+            }
+            std::string next_leaf = new_path.empty() ? "UNKNOWN" : new_path.back()->name();
+            // 5. 替换当前的活跃路径
+            active_states_ = std::move(new_path);
+            step_call_level_--;
+            // 触发全局状态改变事件
+            process_internal(std::make_any<StateChangeEvent>(StateChangeEvent{prev_leaf, next_leaf}));
+        } catch (const std::exception& e) {
+            std::cout << "[Engine]: transition error: " << e.what() << std::endl;
         }
-        step_call_level_++;
-
-        // 1. 让 Action 使用 Tuple 里的参数构建出全新的目标路径
-        std::vector<StatePtr> new_path;
-        action.path_builder(new_path);
-
-        // 2. 寻找新旧路径的最近公共祖先 (LCA)
-        size_t lca_idx = 0;
-        size_t min_len = std::min(active_states_.size(), new_path.size());
-        while (lca_idx < min_len && active_states_[lca_idx]->name() == new_path[lca_idx]->name()) {
-            // 公共祖先不用重新构造，直接复用原实例，保留上下文数据
-            new_path[lca_idx] = active_states_[lca_idx];
-            lca_idx++;
-        }
-
-        std::string prev_leaf = active_states_.empty() ? "UNKNOWN" : active_states_.back()->name();
-
-        // 3. 从旧叶子节点往上退出，直到 LCA 的子节点
-        for (size_t i = active_states_.size(); i > lca_idx; --i) {
-            auto s = active_states_[i - 1];
-            s->on_exit(ctx_);
-            // 派发局部的退出事件
-            process_internal(std::make_any<ExitEvent>(ExitEvent{s->name()}));
-        }
-
-        // 4. 从 LCA 的子节点往下进入，直到新叶子节点
-        for (size_t i = lca_idx; i < new_path.size(); ++i) {
-            auto s = new_path[i];
-            // 派发局部的进入事件
-            process_internal(std::make_any<EnterEvent>(EnterEvent{s->name()}));
-            s->on_enter(ctx_);
-        }
-
-        std::string next_leaf = new_path.empty() ? "UNKNOWN" : new_path.back()->name();
-
-        // 5. 替换当前的活跃路径
-        active_states_ = std::move(new_path);
-
-        step_call_level_--;
-
-        // 触发全局状态改变事件 (可用于 UI 更新)
-        process_internal(std::make_any<StateChangeEvent>(StateChangeEvent{prev_leaf, next_leaf}));
     }
 
     void process_internal(const std::any& e) {
@@ -297,9 +310,15 @@ class BaseEngine : public IEventHandler<IEngine<Context>, Context, void, Derived
 
    public:
     virtual ~BaseEngine() { stop(); }
+
+    using AllowedEvents = std::tuple<>;
+
     const std::vector<StatePtr>& get_active_states() const override { return active_states_; }
-    Context& get_context() { return ctx_; }
+
+    Context& get_context() override { return ctx_; }
+
     boost::asio::io_context& get_ioc() { return io_context_; }
+
     void add_listener(EventListenerPtr listener) { listeners_.push_back(listener); }
 
     std::thread::id get_thread_id() override { return event_thread_id_; }
@@ -376,8 +395,8 @@ class BaseEngine : public IEventHandler<IEngine<Context>, Context, void, Derived
     }
 
     // ====== 引擎生命周期 ======
-    template <typename RootState>
-    void start(std::chrono::milliseconds tick_interval) {
+    template <typename RootState, typename... Args>
+    void start(std::chrono::milliseconds tick_interval, Args&&... args) {
         bool expected = false;
         if (!running_.compare_exchange_strong(expected, true)) return;
 
@@ -385,8 +404,9 @@ class BaseEngine : public IEventHandler<IEngine<Context>, Context, void, Derived
         std::promise<void> init_promise;
         std::future<void> init_future = init_promise.get_future();
 
-        worker_thread_ = std::thread([this, &init_promise]() {
+        worker_thread_ = std::thread([this, &init_promise](auto... args) {
             try {
+                this->ctx_.engine = this;
                 event_thread_id_ = std::this_thread::get_id();
                 work_guard_.emplace(boost::asio::make_work_guard(io_context_));
                 tick_timer_.emplace(io_context_);
@@ -395,7 +415,7 @@ class BaseEngine : public IEventHandler<IEngine<Context>, Context, void, Derived
                 schedule_next_tick();
 
                 // 【核心变化 3】：启动时，利用伪造的 step 跳转到初始状态
-                execute_transition(StateAction<Context>::template step<RootState>());
+                execute_transition(StateAction<Context>::template step<RootState>(std::forward<Args>(args)...));
 
                 init_promise.set_value();
                 io_context_.run();
@@ -432,13 +452,15 @@ class BaseEngine : public IEventHandler<IEngine<Context>, Context, void, Derived
         }
     }
 
-    void step(std::shared_ptr<IState<Context>> state) {
+    void step_internal(const StateAction<Context>& action) override {
+        // 保留原先在 step() 里的线程安全检查
         if (std::this_thread::get_id() != event_thread_id_) {
             throw std::logic_error(
                 "FATAL: step() must be called from the event loop thread! "
                 "Use dispatch() or dispatch_async() instead.");
         }
-        inner_step(state);
+        // 执行底层转换
+        execute_transition(action);
     }
 
     void dispatch_internal(std::any e) override {

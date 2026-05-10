@@ -106,7 +106,7 @@ class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
                                 }
                             } catch (const TraceableException& ex) {
                                 err_msg = ex.what();
-                                detail = ex.format_exc();
+                                // detail = ex.format_exc();
                             } catch (const std::exception& ex) {
                                 err_msg = ex.what();  // 获取具体的报错字符串
                             } catch (...) {
@@ -116,7 +116,7 @@ class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
                             json j_err;
                             j_err["status"] = "error";
                             j_err["msg"] = err_msg;
-                            j_err["detail"] = detail;
+                            // j_err["detail"] = detail;
                             // 3. 发送带具体错误信息的 HTTP响应
                             auto data = j_err.dump();
                             session->send_http_response(http::status::ok, data);

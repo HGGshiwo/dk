@@ -28,7 +28,7 @@ struct TestContext : dk::BaseContext<TestContext> {
 class TestEngine : public dk::BaseEngine<TestContext, TestEngine> {
    public:
     // 测试全局 Hook：记录进出状态
-    using AllowedEvent = std::tuple<dk::EnterEvent, dk::ExitEvent>;
+    using AllowedEvents = std::tuple<dk::EnterEvent, dk::ExitEvent>;
 
     void on_event(const dk::EnterEvent& e, TestContext& ctx) {
         std::lock_guard<std::mutex> lock(ctx.log_mtx);
@@ -43,7 +43,7 @@ class TestEngine : public dk::BaseEngine<TestContext, TestEngine> {
 class StateA : public dk::BaseState<TestContext, StateA, void> {
    public:
     using StateAction = dk::StateAction<TestContext>;
-    using AllowedEvent = std::tuple<EvPing, EvAsyncQuery, EvTriggerInternal>;
+    using AllowedEvents = std::tuple<EvPing, EvAsyncQuery, EvTriggerInternal>;
     // 测试流转
     StateAction on_event(const EvPing&, TestContext& ctx);
 
@@ -60,7 +60,7 @@ class StateA : public dk::BaseState<TestContext, StateA, void> {
 class StateB : public dk::BaseState<TestContext, StateB, void> {
    public:
     using StateAction = dk::StateAction<TestContext>;
-    using AllowedEvent = std::tuple<EvPong>;
+    using AllowedEvents = std::tuple<EvPong>;
 
     StateAction on_event(const EvPong&, TestContext& ctx);
     std::string name() const override { return "StateB"; }

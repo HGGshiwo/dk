@@ -7,19 +7,19 @@
 #include <type_traits>
 #include <vector>
 
-#include "../core.hpp"
 #include "../utils.hpp"
+#include "dk/adapters/base.hpp"
 
 namespace dk {
-template <typename EventType, typename Context, typename EngineType>
-class RosAdapter : public dk::BaseAdapter<EventType, Context, EngineType> {
+template <typename Context, typename EngineType>
+class RosAdapter : public dk::BaseAdapter<Context, EngineType> {
    private:
     ros::NodeHandle nh_;
     std::vector<ros::Subscriber> subs_;  // 自动管理生命周期
 
    public:
     RosAdapter(std::shared_ptr<EngineType> engine, ros::NodeHandle& nh)
-        : dk::BaseAdapter<EventType, Context, EngineType>(engine), nh_(nh) {};
+        : dk::BaseAdapter<Context, EngineType>(engine), nh_(nh) {};
 
     /*
     ## 将rostopic消息同步到Context，使用示例：

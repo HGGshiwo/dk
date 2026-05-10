@@ -1,5 +1,6 @@
 #pragma once
 #include <boost/smart_ptr/shared_ptr.hpp>
+#include <iostream>
 #include <mutex>
 #include <shared_mutex>
 #include <stdexcept>
@@ -9,6 +10,15 @@
 namespace dk {
 
 namespace meta_utils {
+
+template <typename T>
+void print_type() {
+    // __PRETTY_FUNCTION__ 会在编译时生成包含真实类型 T 的字符串，但在运行时打印
+    std::cout << "Type is: " << __PRETTY_FUNCTION__ << std::endl;
+}
+
+template <typename... T>
+struct TypePrinter;  // 只有声明，没有实现
 
 template <typename... Ts>
 struct TypeList {};

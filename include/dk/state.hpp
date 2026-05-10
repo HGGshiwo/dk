@@ -2,20 +2,17 @@
 #include <any>
 #include <functional>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 
-namespace dk {
-// 1. 萃取器：探测子类是否定义了 AllowedEvents，如果没有则返回空 tuple
-template <typename T, typename = void>
-struct get_allowed_events {
-    using type = std::tuple<>;
-};
+#include "./utils.hpp"
 
+namespace dk {
+template <typename T, typename = void>
+struct has_allowed_events : std::false_type {};
 template <typename T>
-struct get_allowed_events<T, std::void_t<typename T::AllowedEvents>> {
-    using type = typename T::AllowedEvents;
-};
+struct has_allowed_events<T, std::void_t<typename T::AllowedEvents>> : std::true_type {};
 
 // 严苛的探针：检查类中是否写了匹配类型的 on_event
 template <typename T, typename Event, typename Context, typename = void>
@@ -52,19 +49,25 @@ class StateAction {
     enum class Type { UNHANDLED, HANDLED, TRANSITION };
     Type type = Type::UNHANDLED;
 
-    // 现在 Context 是合法的了！
-    std::function<void(std::vector<std::shared_ptr<IState<Context>>>&)> path_builder;
-    static StateAction unhandled() { return {Type::UNHANDLED, nullptr}; }
-    static StateAction handled() { return {Type::HANDLED, nullptr}; }
-    template <typename TargetState, typename... Args>
-    static StateAction step(Args&&... args) {
-        StateAction action{Type::TRANSITION, nullptr};
-        // 延迟构造：将目标参数存入 Tuple
-        auto args_tuple = std::make_tuple(std::forward<Args>(args)...);
+    std::function<void(std::vector<std::shared_ptr<IState<Context>>>& out_path,
+                       const std::vector<std::shared_ptr<IState<Context>>>& active_path)>
+        path_builder;
 
-        // 真正执行跳转时，调用 TargetState 内部的静态构造逻辑
-        action.path_builder = [args_tuple](std::vector<std::shared_ptr<IState<Context>>>& path) {
-            TargetState::build_path(path, args_tuple);
+    static StateAction unhandled() { return {Type::UNHANDLED, nullptr}; }
+
+    static StateAction handled() { return {Type::HANDLED, nullptr}; }
+
+    template <typename TargetState, typename... Tuples>
+    static StateAction step(Tuples&&... tuples) {
+        StateAction action{Type::TRANSITION, nullptr};
+        // 将多个层级的 tuple 打包存起来
+        auto args_pack = std::make_tuple(std::forward<Tuples>(tuples)...);
+        action.path_builder = [args_pack](auto& out_path, const auto& active_path) {
+            std::apply(
+                [&out_path, &active_path](auto&&... unpacked_tuples) {
+                    TargetState::build_path(out_path, active_path, unpacked_tuples...);
+                },
+                args_pack);
         };
         return action;
     }
@@ -74,12 +77,22 @@ class StateAction {
 template <typename Context>
 class IState {
    public:
+    IState<Context>* parent_ptr = nullptr;
     virtual ~IState() = default;
     virtual StateAction<Context> handle_event(const std::any& event, Context& ctx) = 0;
     virtual std::string name() const = 0;
+    virtual std::string_view name_view() const = 0;
     virtual void on_enter(Context& ctx) {}
     virtual void on_exit(Context& ctx) {}
 };
+
+// 这个辅助函数的作用是：接收一整包参数，但只取前 N 个传给父状态
+template <typename ParentType, typename OutPath, typename ActivePath, typename ArgsTuple, std::size_t... Is>
+void call_parent_build_path(OutPath& out, const ActivePath& act, const ArgsTuple& args_tuple,
+                            std::index_sequence<Is...>) {
+    // std::get<Is> 会根据传入的 index_sequence，把 0 到 N-1 的参数解包出来传给父类
+    ParentType::build_path(out, act, std::get<Is>(args_tuple)...);
+}
 
 /*
 # 分析子类的AllowedEvents，根据状态进行分发，调用对应的on_event
@@ -90,7 +103,12 @@ class IEventHandler : public BaseInterface {
    public:
     ReturnType handle_event(const std::any& event, Context& ctx) override {
         // 延迟推导类型，避开 CRTP 不完整类型问题
-        using EventTuple = typename get_allowed_events<Derived>::type;
+        static_assert(has_allowed_events<Derived>::value,
+                      "FATAL ERROR: Missing AllowedEvents definition in your State/Listener! Example:\n"
+                      "    using AllowedEvents = std::tuple<EventA, EventB>;\n"
+                      "If it handles NO events, explicitly write:\n"
+                      "    using AllowedEvents = std::tuple<>;");
+        using EventTuple = typename Derived::AllowedEvents;
         // 分支 1：如果业务期望返回 void
         if constexpr (std::is_void_v<ReturnType>) {
             // 黑魔法：传一个空指针过去，只利用类型推导，彻底避免实例化 EventTuple 导致要求事件具有默认构造函数！
@@ -188,21 +206,89 @@ template <typename Context, typename Derived, typename Parent>
 class BaseState : public IEventHandler<IState<Context>, Context, StateAction<Context>, Derived> {
    public:
     using ParentState = Parent;
-    virtual std::string name() const override { return std::string(get_type_name<Derived>()); }
+
+    static constexpr std::string_view static_name() {
+        // 利用你原有的宏或模板提取类型名
+        return get_type_name<Derived>();
+    }
+
+    // 实现基类的虚函数，直接桥接给静态函数
+    std::string_view name_view() const override {
+        // 这里的玄机：通过 Derived:: 来调用，允许子类覆盖静态名字！
+        return Derived::static_name();
+    }
+
+    // 实现基类的虚函数，直接桥接给静态函数
+    std::string name() const override {
+        // 这里的玄机：通过 Derived:: 来调用，允许子类覆盖静态名字！
+        return std::string(Derived::static_name());
+    }
+
     // 提供带参跳转能力
     template <typename TargetState, typename... Args>
     StateAction<Context> step(Args&&... args) {
         return StateAction<Context>::template step<TargetState>(std::forward<Args>(args)...);
     }
-    // 静态路径构建 (树形重构核心)
-    template <typename Tuple>
-    static void build_path(std::vector<std::shared_ptr<IState<Context>>>& path, const Tuple& tuple) {
+    template <typename P = ParentState, typename = std::enable_if_t<!std::is_same_v<P, void>>>
+    P* parent() {
+        return static_cast<P*>(this->parent_ptr);
+    }
+
+    // 静态路径构建 (支持层级参数传递与复用：按 父 -> 子 顺序传参)
+    template <typename... Tuples>
+    static void build_path(std::vector<std::shared_ptr<IState<Context>>>& out_path,
+                           const std::vector<std::shared_ptr<IState<Context>>>& active_path, const Tuples&... args) {
+        // 1. 获取传入的所有 tuple 数量，并打包为引用的元组
+        constexpr size_t NUM_ARGS = sizeof...(Tuples);
+        auto args_tuple = std::tie(args...);
+        // 2. 递归构建父状态 (将前 NUM_ARGS - 1 个参数传给父状态)
         if constexpr (!std::is_same_v<ParentState, void>) {
-            ParentState::build_path(path, std::make_tuple());
+            if constexpr (NUM_ARGS > 1) {
+                // 调用外部的辅助函数，截取前面的参数给父节点
+                call_parent_build_path<ParentState>(out_path, active_path, args_tuple,
+                                                    std::make_index_sequence<NUM_ARGS - 1>{});
+            } else {
+                // 传进来的参数耗尽了（或者根本没传），父状态按空参数处理
+                ParentState::build_path(out_path, active_path);
+            }
         }
-        auto state = std::apply(
-            [](auto&&... args) { return std::make_shared<Derived>(std::forward<decltype(args)>(args)...); }, tuple);
-        path.push_back(state);
+        // 3. 提取当前状态的参数 (永远取最后一个 tuple 给自己)
+        auto current_tuple = [&]() {
+            if constexpr (NUM_ARGS > 0) {
+                return std::get<NUM_ARGS - 1>(args_tuple);  // 准确拿到最后一个参数
+            } else {
+                return std::tuple<>{};  // 没参数时给个空的
+            }
+        }();
+        // 4. 判断当前层级是否可以复用 (运行期判断)
+        size_t current_depth = out_path.size();
+        std::string_view my_name = Derived::static_name();
+        if (current_depth < active_path.size() && active_path[current_depth]->name_view() == my_name) {
+            // 【命中缓存】：直接复用原有的智能指针，跳过构造！
+            out_path.push_back(active_path[current_depth]);
+        } else {
+            // 【未命中缓存】：必须真正执行构造
+            auto state = std::apply(
+                [](auto&&... unpacked_args) -> std::shared_ptr<IState<Context>> {
+                    // 此时 current_tuple 里的参数就是精准给当前状态的了
+                    if constexpr (std::is_constructible_v<Derived, decltype(unpacked_args)...>) {
+                        return std::make_shared<Derived>(std::forward<decltype(unpacked_args)>(unpacked_args)...);
+                    } else {
+                        // 不能匹配返回 nullptr，交给后面的安全校验处理
+                        return nullptr;
+                    }
+                },
+                current_tuple);
+
+            // 运行期安全校验
+            if (!state) {
+                meta_utils::print_type<decltype(current_tuple)>();
+                throw std::logic_error(
+                    "FATAL: State '" + std::string(my_name) +
+                    "' cannot be reused, but appropriate constructor arguments were NOT provided in step()!");
+            }
+            out_path.push_back(state);
+        }
     }
 };
 
