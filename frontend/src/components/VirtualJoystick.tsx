@@ -222,7 +222,7 @@ const VirtualJoystick: React.FC<VirtualJoystickProps> = (props) => {
 
 function VirtualJoystickGroup() {
   const config = useAppStore(state => state.config);
-  const joystickConfig = config?.joystick || {};
+  const joystickConfig = config?.joystick || [];
   const containerStyle: CSSProperties = {
     zIndex: 9999,
     position: "fixed",
@@ -231,10 +231,10 @@ function VirtualJoystickGroup() {
   };
   return (
     <div style={containerStyle}>
-      {Object.entries(joystickConfig).map(([key, item]) => {
+      {joystickConfig.map(item => {
         return (
           <VirtualJoystick
-            key={key}
+            key={item.key}
             onMove={(data) => httpRequest(item["method"], item["url"], data)}
           />
         );

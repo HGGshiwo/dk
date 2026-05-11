@@ -5,17 +5,18 @@ import Table, { type TableColumnConfig } from "./Table";
 import { useMemo } from "react";
 
 export interface TableGroupConfig {
-  columns: Record<string, TableColumnConfig>;
+  columns: TableColumnConfig[];
   curIndexKey?: string; // 使用ws这哪个数据作为高亮索引
+  key: string;
 }
 
 export default function TableGroup() {
   const { config, stateData } = useAppStore();
-  const tableConfig = useMemo(() => config?.table || {}, [config?.table]);
+  const tableConfig = useMemo(() => config?.table || [], [config?.table]);
 
   const hasData = useMemo(() => {
-    return Object.keys(tableConfig).some(
-      (key) => !!(stateData[key] as any[])?.length,
+    return tableConfig.some(
+      (item) => !!(stateData[item.key] as any[])?.length,
     );
   }, [stateData, tableConfig]);
 
@@ -27,15 +28,13 @@ export default function TableGroup() {
         variant="borderless"
         style={{ boxShadow: "0 2px 8px rgba(0,0,0,0.08)" }}
       >
-        {Object.entries(tableConfig).map(([key, item]) => {
-          const columns = Object.entries(item.columns).map(
-            ([colKey, item]) => ({ ...item, key: colKey }),
-          );
+        {tableConfig.map((item) => {
+          const columns = item.columns;
           const curIndex = item.curIndexKey && stateData[item.curIndexKey];
           return (
             <Table
-              key={key}
-              data={(stateData[key] as any) || []}
+              key={item.key}
+              data={(stateData[item.key] as any) || []}
               columns={columns}
               curIndex={curIndex as number}
             />

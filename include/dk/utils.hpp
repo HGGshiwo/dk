@@ -1,11 +1,17 @@
 #pragma once
+#include <yaml-cpp/yaml.h>
+
 #include <boost/smart_ptr/shared_ptr.hpp>
+#include <fstream>
 #include <iostream>
 #include <mutex>
+#include <nlohmann/json.hpp>
 #include <shared_mutex>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+using json = nlohmann::json;
 
 namespace dk {
 
@@ -109,47 +115,74 @@ struct callable_traits<R (ClassType::*)(Args...)> {
 };
 }  // namespace meta_utils
 
-template <typename T>
-class thread_safe {
-   private:
-    T data_;
-    mutable std::shared_mutex mtx_;
+// 递归：YAML 标量类型推断
+static json yaml_to_json(const YAML::Node& node) {
+    json j;
+    switch (node.Type()) {
+        case YAML::NodeType::Null:
+            j = nullptr;
+            break;
+        case YAML::NodeType::Scalar: {
+            try {
+                return node.as<bool>();
+            } catch (...) {
+            }
+            try {
+                return node.as<int64_t>();
+            } catch (...) {
+            }
+            try {
+                return node.as<double>();
+            } catch (...) {
+            }
+            return node.as<std::string>();
+        }
+        case YAML::NodeType::Sequence: {
+            j = json::array();
+            for (const auto& item : node) j.push_back(yaml_to_json(item));
+            break;
+        }
+        case YAML::NodeType::Map: {
+            j = json::object();
+            for (const auto& kv : node) j[kv.first.as<std::string>()] = yaml_to_json(kv.second);
+            break;
+        }
+        default:
+            break;
+    }
+    return j;
+}
 
-   public:
-    template <typename... Args>
-    thread_safe(Args&&... args) : data_(std::forward<Args>(args)...) {}
-    // ==========================================
-    // 接口 1：写操作（独占锁）
-    // 强制要求传递 T& (或 auto&)，否则直接编译报错！
-    // ==========================================
-    template <typename Func>
-    decltype(auto) write(Func&& func) {
-        // 1. 确保函数可以用 T&（左值引用）调用
-        static_assert(std::is_invocable_v<Func, T&>, "write callback error: Argument must be T&!");
-        // 2. 核心魔法：确保函数【不能】用 T（右值）调用
-        // 这完美拦截了传值拷贝 `[](T x)` 和常引用 `[](const T& x)`
-        static_assert(!std::is_invocable_v<Func, T>, "write callback error: Argument must be T& or auto&!");
-        std::unique_lock<std::shared_mutex> lock(mtx_);
-        // 完美转发传入的 callable 对象
-        return std::forward<Func>(func)(data_);
+/**
+ * 核心流程: 读取 YAML -> 转为 JSON -> 注入 C++ 结构体补全默认值 -> 生成最终 JSON
+ */
+inline json load_and_complete(const std::string& yaml_path) {
+    try {
+        // 1. 读取 YAML
+        YAML::Node yaml_root = YAML::LoadFile(yaml_path);
+
+        // 2. 初步转为无类型推断缺失字段的 JSON
+        json raw_json = yaml_to_json(yaml_root);
+
+        return raw_json;
+
+    } catch (const std::exception& e) {
+        std::cerr << "配置加载失败: " << e.what() << std::endl;
+        throw;
     }
-    // ==========================================
-    // 接口 2：读操作（共享锁）
-    // ==========================================
-    template <typename Func>
-    decltype(auto) read(Func&& func) const {
-        // 提供友好的编译期错误提示
-        static_assert(std::is_invocable_v<Func, const T&>, "read callback error: Argument must be const T&!");
-        std::shared_lock<std::shared_mutex> lock(mtx_);
-        return std::forward<Func>(func)(data_);
+}
+
+/**
+ * 直接加载 yaml 并生成 json 文件
+ */
+inline void generate_json_file(const std::string& yaml_path, const std::string& json_path) {
+    json final_json = load_and_complete(yaml_path);
+    std::ofstream out(json_path);
+    if (out.is_open()) {
+        out << final_json.dump(4);  // 4 空格缩进格式化
+        std::cout << "✅ 配置文件已生成: " << json_path << std::endl;
+    } else {
+        std::cerr << "❌ 无法写入文件: " << json_path << std::endl;
     }
-    T get() const {
-        std::shared_lock<std::shared_mutex> lock(mtx_);  // 注意：get 应该用共享锁(读锁)
-        return data_;
-    }
-    void set(T data) {
-        std::unique_lock<std::shared_mutex> lock(mtx_);
-        data_ = std::move(data);  // 优化：使用 std::move 减少一次拷贝
-    }
-};
+}
 }  // namespace dk

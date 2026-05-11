@@ -217,53 +217,75 @@ class BaseEngine : public IEventHandler<IEngine<Context>, Context, void, Derived
     uint64_t next_wait_id_ = 0;
 
     int step_call_level_ = 0;  // step调用层数
+
+    // Buffer for transition requested during an active transition (e.g., inside on_enter/on_exit)
+    std::optional<StateAction<Context>> pending_transition_;
+
    private:
     // LCA (最近公共祖先) 状态树跳转计算
-    void execute_transition(const StateAction<Context>& action) {
+    void execute_transition(StateAction<Context> action) {
         try {
             if (step_call_level_ != 0) {
-                throw std::logic_error("FATAL: Cannot change state when a transition is already in progress!");
+                // Buffer the transition request to be processed by the active loop
+                pending_transition_ = std::move(action);
+                return;
             }
-            step_call_level_++;
-            std::vector<StatePtr> new_path;
-            // 【修改点 4】：将当前的 active_states_ 传给 Builder
-            action.path_builder(new_path, active_states_);
-            // 2. 寻找新旧路径的最近公共祖先 (LCA)
-            size_t lca_idx = 0;
-            size_t min_len = std::min(active_states_.size(), new_path.size());
 
-            // 【修改点 5】：直接使用指针比较，因为如果名字一致，Builder 直接推入了相同的指针
-            while (lca_idx < min_len && active_states_[lca_idx] == new_path[lca_idx]) {
-                lca_idx++;
+            step_call_level_++;
+            while (true) {
+                pending_transition_.reset();
+                std::vector<StatePtr> new_path;
+                action.path_builder(new_path, active_states_);
+                size_t lca_idx = 0;
+                size_t min_len = std::min(active_states_.size(), new_path.size());
+                while (lca_idx < min_len && active_states_[lca_idx] == new_path[lca_idx]) {
+                    lca_idx++;
+                }
+
+                std::string prev_leaf = active_states_.empty() ? "UNKNOWN" : active_states_.back()->name();
+                for (size_t i = active_states_.size(); i > lca_idx; --i) {
+                    auto s = active_states_[i - 1];
+                    s->on_exit(ctx_);
+                    process_internal(std::make_any<ExitEvent>(ExitEvent{s->name()}));
+                }
+                if (pending_transition_.has_value()) {
+                    // Transition hijacked during on_exit, abort entering new states
+                    new_path.resize(lca_idx);
+                } else {
+                    for (size_t i = lca_idx; i < new_path.size(); ++i) {
+                        auto s = new_path[i];
+                        s->parent_ptr = i >= 1 ? new_path[i - 1].get() : nullptr;
+
+                        process_internal(std::make_any<EnterEvent>(EnterEvent{s->name()}));
+                        s->on_enter(ctx_);
+                        if (pending_transition_.has_value()) {
+                            // Transition hijacked during on_enter, truncate path to current state
+                            new_path.resize(i + 1);
+                            break;
+                        }
+                    }
+                }
+                std::string next_leaf = new_path.empty() ? "UNKNOWN" : new_path.back()->name();
+                active_states_ = std::move(new_path);
+
+                process_internal(std::make_any<StateChangeEvent>(StateChangeEvent{prev_leaf, next_leaf}));
+                if (pending_transition_.has_value()) {
+                    // Continue the loop with the hijacked transition
+                    action = std::move(*pending_transition_);
+                } else {
+                    // All transitions completed successfully
+                    break;
+                }
             }
-            std::string prev_leaf = active_states_.empty() ? "UNKNOWN" : active_states_.back()->name();
-            // 3. 从旧叶子节点往上退出，直到 LCA 的子节点
-            for (size_t i = active_states_.size(); i > lca_idx; --i) {
-                auto s = active_states_[i - 1];
-                s->on_exit(ctx_);
-                process_internal(std::make_any<ExitEvent>(ExitEvent{s->name()}));
-            }
-            // 4. 从 LCA 的子节点往下进入，直到新叶子节点
-            for (size_t i = lca_idx; i < new_path.size(); ++i) {
-                auto s = new_path[i];
-                s->parent_ptr = i >= 1 ? new_path[i - 1].get() : nullptr;  // 修改为.get()，因为这里是智能指针
-                process_internal(std::make_any<EnterEvent>(EnterEvent{s->name()}));
-                s->on_enter(ctx_);
-            }
-            std::string next_leaf = new_path.empty() ? "UNKNOWN" : new_path.back()->name();
-            // 5. 替换当前的活跃路径
-            active_states_ = std::move(new_path);
             step_call_level_--;
-            // 触发全局状态改变事件
-            process_internal(std::make_any<StateChangeEvent>(StateChangeEvent{prev_leaf, next_leaf}));
         } catch (const std::exception& e) {
+            step_call_level_ = 0;
             std::cout << "[Engine]: transition error: " << e.what() << std::endl;
         }
     }
 
     void process_internal(const std::any& e) {
-        //  std::cout << "[Engine] Processing event of type: " << e.type().name() << std::endl;
-        // 1. 触发 Wait 系统
+        // 1. 触发 Wait 系统 (纯异步无状态修改，无需拦截)
         for (auto it = active_waits_.begin(); it != active_waits_.end();) {
             if (it->second->promise->state() != PromiseState::PENDING) {
                 it = active_waits_.erase(it);
@@ -274,29 +296,49 @@ class BaseEngine : public IEventHandler<IEngine<Context>, Context, void, Derived
                 ++it;
             }
         }
-
+        // =======================================================
+        // === 开启事件处理周期的统一防护：所有显式跳转转为缓存 ===
+        // =======================================================
+        step_call_level_++;
+        StateAction<Context> final_transition = StateAction<Context>::unhandled();
         // 2. 触发全局无状态监听器
         for (auto& listener : listeners_) {
             listener->handle_event(e, ctx_);
         }
-
         // 3. 触发引擎自身的拦截 (BaseEngine 继承自 IEventHandler)
-        this->handle_event(e, ctx_);
-
+        if (!pending_transition_.has_value()) {
+            this->handle_event(e, ctx_);
+        }
         // 4. HSM 事件冒泡核心：从【叶子节点】向【根节点】逐级探测
-        for (auto it = active_states_.rbegin(); it != active_states_.rend(); ++it) {
-            // std::cout << "[Engine] Dispatching to state: " << (*it)->name() << std::endl;
-            StateAction<Context> action = (*it)->handle_event(e, ctx_);
-
-            if (action.type == StateAction<Context>::Type::TRANSITION) {
-                // 如果某个层级决定切换状态，立即执行切换并终止冒泡
-                execute_transition(action);
-                return;
-            } else if (action.type == StateAction<Context>::Type::HANDLED) {
-                // 如果某个层级消耗了该事件，终止冒泡
-                return;
+        if (!pending_transition_.has_value()) {
+            for (auto it = active_states_.rbegin(); it != active_states_.rend(); ++it) {
+                StateAction<Context> action = (*it)->handle_event(e, ctx_);
+                if (action.type == StateAction<Context>::Type::TRANSITION) {
+                    // 【规则1】：Return 的意图优先级最高，覆盖之前任何可能缓存的显式 step 调用
+                    final_transition = action;
+                    pending_transition_.reset();
+                    break;
+                } else if (pending_transition_.has_value()) {
+                    // 【规则2】：状态内部显式调用了 step()，但没有 return 导致它被捕获
+                    final_transition = std::move(*pending_transition_);
+                    pending_transition_.reset();
+                    break;  // 状态已被切换意图截断，停止冒泡
+                } else if (action.type == StateAction<Context>::Type::HANDLED) {
+                    break;  // 事件被吞噬，终止冒泡
+                }
             }
-            // 如果是 UNHANDLED，继续往上冒泡 (给父节点处理的机会)
+        } else {
+            // 如果在全局监听器或引擎监听器中发生了跳转，直接提取
+            final_transition = std::move(*pending_transition_);
+            pending_transition_.reset();
+        }
+        // =======================================================
+        // === 防护解除，统一结算状态树 ===
+        // =======================================================
+        step_call_level_--;
+        // 如果最终决议需要发生跳转，在这里绝对安全地执行！
+        if (final_transition.type == StateAction<Context>::Type::TRANSITION) {
+            execute_transition(final_transition);
         }
     }
 

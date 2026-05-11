@@ -36,6 +36,7 @@ export interface GlobalConfig {
   logbox: LogTypeConfig[]; // 日志框的配置
   table: TableGroupConfig[]; // 表格的配置
   waypointVis?: WaypointVisConfig;
+  key: string;
 }
 
 // 核心类型定义（完全不变）

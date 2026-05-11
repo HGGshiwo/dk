@@ -56,6 +56,9 @@ class WsConnection : public std::enable_shared_from_this<WsConnection> {
 
     // Handle received ACK from client
     virtual void handle_ack(uint64_t msg_id) = 0;
+
+    // Send state-based reliable message with a specific key
+    virtual void send_state(const std::string& state_key, nlohmann::json msg_json) = 0;
 };
 
 // ==========================================
@@ -111,6 +114,14 @@ class ConnectionManager {
         for (auto& [id, conn] : connections_) {
             // Each connection will copy the JSON, assign its own msg_id, and track it
             conn->send_reliable(msg_json);
+        }
+    }
+
+    // Broadcast a state-based reliable message to all connected clients
+    void publish_state(const std::string& state_key, const nlohmann::json& msg_json) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto& [id, conn] : connections_) {
+            conn->send_state(state_key, msg_json);
         }
     }
 };

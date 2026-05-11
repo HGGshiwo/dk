@@ -92,6 +92,9 @@ const initWebSocket = () => {
             stateData: { ...currentState, [dataType]: [...currentList, data] },
           });
         }
+        if (data.msg_id != undefined) {
+          ws.send(JSON.stringify({ msg_id: data.msg_id }))
+        }
       } catch (error) {
         console.error("WS消息解析失败：", error);
       }

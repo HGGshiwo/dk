@@ -18,6 +18,14 @@ class WsSessionImpl : public WsConnection {
         std::shared_ptr<boost::asio::steady_timer> timer;
         int retry_count;
     };
+
+    // Struct to hold pending state data
+    struct PendingState {
+        uint64_t current_msg_id;
+        std::shared_ptr<boost::asio::steady_timer> timer;
+        int retry_count;
+    };
+
     // Auto-increment sequence for this specific connection
     std::atomic<uint64_t> msg_seq_{0};
 
@@ -26,6 +34,11 @@ class WsSessionImpl : public WsConnection {
 
     // Map of msg_id to pending messages
     std::map<uint64_t, PendingMsg> pending_msgs_;
+
+    // State-based reliable messages tracking
+    std::map<std::string, nlohmann::json> latest_states_;
+    std::map<std::string, PendingState> pending_states_;
+    std::map<uint64_t, std::string> state_ack_map_;
 
    public:
     WsSessionImpl(tcp::socket&& socket, WsEndpoint endpoint)
@@ -75,30 +88,66 @@ class WsSessionImpl : public WsConnection {
         // 2. Inject msg_id into json
         msg_json["msg_id"] = current_id;
 
-        // 3. Serialize to string
-        std::string payload = msg_json.dump();
-
         // 4. Start the reliable send loop
-        do_send_and_wait(current_id, payload, 0);
+        do_send_and_wait(current_id, msg_json, 0);
+    }
+
+    void send_state(const std::string& state_key, nlohmann::json msg_json) override {
+        std::lock_guard<std::mutex> lock(pending_mutex_);
+
+        // Always store the latest data for this key
+        latest_states_[state_key] = msg_json;
+        auto it = pending_states_.find(state_key);
+        if (it != pending_states_.end()) {
+            // State is already waiting for ACK. Update payload and send immediately.
+            // We keep the same msg_id and timer, so it acts like a transparent update.
+            uint64_t msg_id = it->second.current_msg_id;
+            msg_json["msg_id"] = msg_id;
+            // msg_json["state_key"] = state_key;
+            send(msg_json);
+        } else {
+            // New state tracking
+            uint64_t current_id = ++msg_seq_;
+            state_ack_map_[current_id] = state_key;
+            msg_json["msg_id"] = current_id;
+            // msg_json["state_key"] = state_key;
+            send(msg_json);
+            auto timer = std::make_shared<boost::asio::steady_timer>(ws_.get_executor());
+            timer->expires_after(std::chrono::milliseconds(1000));
+            pending_states_[state_key] = {current_id, timer, 0};
+            do_state_wait(state_key, current_id, timer, 0);
+        }
     }
 
     void handle_ack(uint64_t ack_id) override {
         std::lock_guard<std::mutex> lock(pending_mutex_);
-
+        // 1. Check normal reliable messages
         auto it = pending_msgs_.find(ack_id);
         if (it != pending_msgs_.end()) {
-            // Cancel timer
             boost::system::error_code ec;
             it->second.timer->cancel(ec);
-
-            // Remove from waiting queue
             pending_msgs_.erase(it);
+            return;
+        }
+        // 2. Check state-based reliable messages
+        auto ack_it = state_ack_map_.find(ack_id);
+        if (ack_it != state_ack_map_.end()) {
+            std::string state_key = ack_it->second;
+            auto state_it = pending_states_.find(state_key);
+
+            // If the ACK matches the active msg_id for this state
+            if (state_it != pending_states_.end() && state_it->second.current_msg_id == ack_id) {
+                boost::system::error_code ec;
+                state_it->second.timer->cancel(ec);
+                pending_states_.erase(state_it);
+            }
+            state_ack_map_.erase(ack_it);
         }
     }
 
    private:
     // Core function to send and start timeout timer
-    void do_send_and_wait(uint64_t msg_id, const std::string& payload, int retry_count) {
+    void do_send_and_wait(uint64_t msg_id, const json& payload, int retry_count) {
         // Max 3 retries, then give up (you can adjust this)
         if (retry_count > 3) {
             std::lock_guard<std::mutex> lock(pending_mutex_);
@@ -133,6 +182,40 @@ class WsSessionImpl : public WsConnection {
                 // If no ACK received, try again
                 if (needs_retry) {
                     self->do_send_and_wait(msg_id, payload, retry_count + 1);
+                }
+            }
+        });
+    }
+
+    void do_state_wait(std::string state_key, uint64_t msg_id, std::shared_ptr<boost::asio::steady_timer> timer,
+                       int retry_count) {
+        std::weak_ptr<WsSessionImpl> weak_self = derived_from_this();
+        timer->async_wait([weak_self, state_key, msg_id, retry_count](boost::system::error_code ec) {
+            if (ec) return;
+            if (auto self = weak_self.lock()) {
+                std::lock_guard<std::mutex> lock(self->pending_mutex_);
+                auto it = self->pending_states_.find(state_key);
+
+                // Ensure this state is still active and hasn't been replaced by a new lifecycle
+                if (it != self->pending_states_.end() && it->second.current_msg_id == msg_id) {
+                    if (retry_count >= 3) {
+                        self->pending_states_.erase(it);
+                        self->state_ack_map_.erase(msg_id);
+                        return;
+                    }
+                    // Dynamically fetch the LATEST data for this key
+                    nlohmann::json latest_msg = self->latest_states_[state_key];
+                    latest_msg["msg_id"] = msg_id;
+                    // latest_msg["state_key"] = state_key;
+
+                    self->send(latest_msg);
+                    // Setup next retry timer
+                    auto new_timer = std::make_shared<boost::asio::steady_timer>(self->ws_.get_executor());
+                    new_timer->expires_after(std::chrono::milliseconds(1000));
+                    it->second.timer = new_timer;
+                    it->second.retry_count = retry_count + 1;
+
+                    self->do_state_wait(state_key, msg_id, new_timer, retry_count + 1);
                 }
             }
         });

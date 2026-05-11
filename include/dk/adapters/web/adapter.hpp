@@ -33,6 +33,10 @@ inline boost::beast::string_view get_mime_type(boost::beast::string_view path) {
     return "application/octet-stream";
 }
 
+struct WsOpenEvent {
+    std::shared_ptr<WsConnection> conn;
+};
+
 template <typename Context, typename DerivedEngine>
 class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
    private:
@@ -209,7 +213,10 @@ class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
         std::function<void(std::shared_ptr<WsConnection>, const std::string&)> business_message_handler) {
         WsEndpoint managed_endpoint;
 
-        managed_endpoint.on_open = [this](std::shared_ptr<WsConnection> conn) { conn_manager_->add(conn); };
+        managed_endpoint.on_open = [this](std::shared_ptr<WsConnection> conn) {
+            this->engine_->dispatch(WsOpenEvent{conn});
+            conn_manager_->add(conn);
+        };
         managed_endpoint.on_close = [this](std::shared_ptr<WsConnection> conn) { conn_manager_->remove(conn); };
         managed_endpoint.on_message = [this, business_message_handler](std::shared_ptr<WsConnection> conn,
                                                                        std::string msg) {
