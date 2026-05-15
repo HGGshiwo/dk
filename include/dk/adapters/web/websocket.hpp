@@ -14,7 +14,7 @@ class WsSessionImpl : public WsConnection {
 
     // Struct to hold pending message data and its timer
     struct PendingMsg {
-        std::string payload;
+        json payload;
         std::shared_ptr<boost::asio::steady_timer> timer;
         int retry_count;
     };

@@ -37,6 +37,8 @@ struct WsOpenEvent {
     std::shared_ptr<WsConnection> conn;
 };
 
+inline uint MAX_LOG_LENGTH = 200;  // 最多记录200个字符
+
 template <typename Context, typename DerivedEngine>
 class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
    private:
@@ -105,23 +107,33 @@ class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
 
     // --- 2. 现有的 HTTP JSON 路由 (API 保持不变) ---
     template <typename SpecificEvent, typename SpecificResult>
-    void register_route(boost::beast::http::verb method, const std::string& path, uint32_t timeout_ms = 5000) {
+    void register_route(
+        boost::beast::http::verb method, const std::string& path, uint32_t timeout_ms = 5000,
+        std::function<void(SpecificEvent& e)> post_processor = [](SpecificEvent& e) {}) {
         // HTTP 专用的 Handler 实现
         class HttpRouteHandler : public IProtocolHandler<WebAdapter> {
             WebAdapter* adapter_;
             uint32_t timeout_ms_;
             std::string method_;
             std::string path_;
+            std::function<void(SpecificEvent& e)> post_processor_;
+
             void log_requst(const std::string& data) {
-                spdlog::info("receive request: method={} path={} body={}", method_, path_, data);
+                spdlog::info("receive request: method={} path={} body={}", method_, path_,
+                             data.substr(0, MAX_LOG_LENGTH));
             }
             void log_result(const std::string& data) {
-                spdlog::info("send request: method={} path={} body={}", method_, path_, data);
+                spdlog::info("send request: method={} path={} body={}", method_, path_, data.substr(0, MAX_LOG_LENGTH));
             };
 
            public:
-            HttpRouteHandler(WebAdapter* adapter, uint32_t timeout_ms, const std::string method, const std::string path)
-                : adapter_(adapter), timeout_ms_(timeout_ms), method_(method), path_(path) {}
+            HttpRouteHandler(WebAdapter* adapter, uint32_t timeout_ms, const std::string method, const std::string path,
+                             std::function<void(SpecificEvent& e)> post_processor)
+                : adapter_(adapter),
+                  timeout_ms_(timeout_ms),
+                  method_(method),
+                  path_(path),
+                  post_processor_(post_processor) {}
 
             void handle(std::shared_ptr<HttpSession<WebAdapter>> session,
                         http::request<http::string_body> req) override {
@@ -129,6 +141,7 @@ class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
                     log_requst(req.body());
                     SpecificEvent event =
                         req.body().empty() ? SpecificEvent{} : json::parse(req.body()).template get<SpecificEvent>();
+                    post_processor_(event);
                     auto future_res = adapter_->dispatch_async(event, timeout_ms_);
 
                     std::move(future_res)
@@ -173,7 +186,8 @@ class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
         };
 
         auto method_str = std::string(boost::beast::http::to_string(method));
-        register_handler(method, path, std::make_shared<HttpRouteHandler>(this, timeout_ms, method_str, path));
+        register_handler(method, path,
+                         std::make_shared<HttpRouteHandler>(this, timeout_ms, method_str, path, post_processor));
         spdlog::info("WebAdapter register route: method={} path={}", method_str, path);
     }
 
@@ -398,6 +412,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession<AdapterType>
         file.open(full_path.string().c_str(), beast::file_mode::scan, ec);
         // 文件打开失败 (不存在或无权限)
         if (ec) {
+            spdlog::error("[WebAdapter] file {} not available: {}", full_path.string(), ec.message());
             send_http_response(http::status::not_found, "File not found");
             return;
         }
@@ -437,10 +452,15 @@ class HttpSession : public std::enable_shared_from_this<HttpSession<AdapterType>
     }
 
     static bool is_valid_match(const std::string& path, const std::string& prefix) {
+        if (prefix.empty() || path.empty()) return false;
+
         if (path.find(prefix) != 0) return false;
-        if (path.length() == prefix.length()) return true;  // 完全相等
-        if (prefix.back() == '/') return true;              // 前缀是以 '/' 结尾的，比如 "/home/"
-        return path[prefix.length()] == '/';  // path 截断处的字符必须是 '/'，比如 "/home/assets"
+        if (path.length() == prefix.length()) return true;  // Exact match
+
+        if (prefix == "/") return false;
+
+        if (prefix.back() == '/') return true;  // e.g., "/home/" matches "/home/assets"
+        return path[prefix.length()] == '/';    // e.g., "/home" matches "/home/assets"
     }
 
     void process_request() {
@@ -472,6 +492,8 @@ class HttpSession : public std::enable_shared_from_this<HttpSession<AdapterType>
             }
         }
         // 3. 都找不到，返回 404
+        spdlog::error("[WebAdapter] {} {} not found, return 404!", boost::beast::http::to_string(req_.method()),
+                      pure_path);
         send_http_response(http::status::not_found, "{\"error\":\"Not Found\"}");
     }
 

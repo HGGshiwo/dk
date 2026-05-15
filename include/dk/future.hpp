@@ -479,6 +479,9 @@ class Promise {
     }
 
     ~Promise() {
+        if (!state_) {
+            return;
+        }
         // 需要加锁或者检查内部状态
         bool is_pending = false;
         {
@@ -494,20 +497,34 @@ class Promise {
 
     PromiseState state() { return state_->state; }
 
-    explicit Promise(IAsyncRuntime* rt, std::optional<CancellationToken> token = std::nullopt)
+    explicit Promise(std::shared_ptr<IAsyncRuntime> rt, std::optional<CancellationToken> token = std::nullopt)
         : state_(std::make_shared<SharedState<T>>()) {
-        // 自动解包 1：将 rt 的内部方法绑定为微队列派发器
-        state_->dispatcher = [rt](std::function<void()> task) { rt->post_future_task(std::move(task)); };
-        // 自动解包 2：将 rt 的内部方法绑定为超时调度器
-        state_->timeout_scheduler = [rt](uint32_t ms, std::function<void()> on_timeout) {
-            return rt->set_future_timeout(ms, std::move(on_timeout));
+        // 捕获 weak_ptr，防止循环引用，同时保证调用时检查存活状态
+        std::weak_ptr<IAsyncRuntime> weak_rt = rt;
+        state_->dispatcher = [weak_rt](std::function<void()> task) {
+            if (auto strong_rt = weak_rt.lock()) {  // 调用前检查 rt 是否还活着
+                strong_rt->post_future_task(std::move(task));
+            }
         };
-        state_->token = std::move(token);  // 初始化时注入
+        state_->timeout_scheduler = [weak_rt](uint32_t ms, std::function<void()> on_timeout) -> std::function<void()> {
+            if (auto strong_rt = weak_rt.lock()) {
+                return strong_rt->set_future_timeout(ms, std::move(on_timeout));
+            }
+            return []() {};  // 或者返回一个表示失败的 timer_id
+        };
+        state_->token = std::move(token);
     }
 
     Future<T> get_future() { return Future<T>(state_); }
 
     static Future<T> resolve(IAsyncRuntime* rt, T val, std::optional<CancellationToken> token = std::nullopt) {
+        auto p = Promise<T>(rt, token);
+        p.resolve(val);
+        return p.get_future();
+    }
+
+    static Future<T> resolve(std::shared_ptr<IAsyncRuntime> rt, T val,
+                             std::optional<CancellationToken> token = std::nullopt) {
         auto p = Promise<T>(rt, token);
         p.resolve(val);
         return p.get_future();

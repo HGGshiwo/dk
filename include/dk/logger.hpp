@@ -9,6 +9,8 @@
 #include "spdlog/sinks/stdout_color_sinks.h"  // 终端带颜色的输出
 #include "spdlog/spdlog.h"
 
+inline const std::string LOG_DIR = "/home/hgg/catkin_ws/src/logs/my_log.txt";
+
 namespace dk {
 inline void init_logger() {
     try {
@@ -17,7 +19,7 @@ inline void init_logger() {
         console_sink->set_level(spdlog::level::info);         // 控制台只显示 info 及以上
         console_sink->set_pattern("[%H:%M:%S] [%^%l%$] %v");  // 设置带颜色的格式
         // 2. 创建文件 Sink（按天轮转，多线程安全版）
-        auto file_sink = std::make_shared<spdlog::sinks::daily_file_sink_mt>("logs/my_log.txt", 23, 59);
+        auto file_sink = std::make_shared<spdlog::sinks::daily_file_sink_mt>(LOG_DIR, 23, 59);
         file_sink->set_level(spdlog::level::trace);  // 文件中记录所有细节
         file_sink->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] [thread %t] %v");
         // 3. 将多个 Sink 组合成一个 Logger

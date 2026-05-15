@@ -39,35 +39,59 @@ constexpr std::string_view get_type_name() {
 #endif
 }
 
+// 前置声明
 template <typename Context>
 class IState;
+template <typename Context>
+class IStatePathBuilder {
+   public:
+    virtual ~IStatePathBuilder() = default;
+    // 检查当前深度的状态是否可以复用
+    virtual bool try_reuse(std::string_view state_name) = 0;
+    // 获取当前内存分配游标
+    virtual size_t get_memory_mark() const = 0;
+    // 分配内存
+    virtual void* allocate_bytes(size_t size, size_t alignment) = 0;
+    // 注册新构造的状态，并提供其析构函数擦除
+    virtual void push_new_state(IState<Context>* state, void (*destroy_fn)(IState<Context>*),
+                                size_t original_offset) = 0;
+    // 辅助函数：定位 new 构造状态
+    template <typename T, typename... Args>
+    void emplace(Args&&... args) {
+        // 1. 在分配内存【之前】，精准记录下内存池的状态
+        size_t rollback_mark = get_memory_mark();
 
-// 状态跳转指令 (支持参数携带和延迟构造)
+        // 2. 分配并构造
+        void* mem = allocate_bytes(sizeof(T), alignof(T));
+        if (!mem) throw std::bad_alloc();
+        T* instance = new (mem) T(std::forward<Args>(args)...);
+
+        // 3. 把状态和【准确的回退点】一起注册进去
+        push_new_state(instance, [](IState<Context>* ptr) { static_cast<T*>(ptr)->~T(); }, rollback_mark);
+    }
+};
+
+template <typename ParentType, typename Builder, typename ArgsTuple, std::size_t... Is>
+void call_parent_build_path(Builder& builder, const ArgsTuple& args_tuple, std::index_sequence<Is...>) {
+    ParentType::build_path(builder, std::get<Is>(args_tuple)...);
+}
 template <typename Context>
 class StateAction {
    public:
     enum class Type { UNHANDLED, HANDLED, TRANSITION };
     Type type = Type::UNHANDLED;
-
-    std::function<void(std::vector<std::shared_ptr<IState<Context>>>& out_path,
-                       const std::vector<std::shared_ptr<IState<Context>>>& active_path)>
-        path_builder;
-
+    // 重点：签名大幅度简化
+    std::function<void(IStatePathBuilder<Context>& builder)> path_builder;
     static StateAction unhandled() { return {Type::UNHANDLED, nullptr}; }
-
     static StateAction handled() { return {Type::HANDLED, nullptr}; }
-
     template <typename TargetState, typename... Tuples>
     static StateAction step(Tuples&&... tuples) {
         StateAction action{Type::TRANSITION, nullptr};
-        // 将多个层级的 tuple 打包存起来
         auto args_pack = std::make_tuple(std::forward<Tuples>(tuples)...);
-        action.path_builder = [args_pack](auto& out_path, const auto& active_path) {
-            std::apply(
-                [&out_path, &active_path](auto&&... unpacked_tuples) {
-                    TargetState::build_path(out_path, active_path, unpacked_tuples...);
-                },
-                args_pack);
+
+        action.path_builder = [args_pack](IStatePathBuilder<Context>& builder) {
+            std::apply([&builder](auto&&... unpacked_tuples) { TargetState::build_path(builder, unpacked_tuples...); },
+                       args_pack);
         };
         return action;
     }
@@ -85,14 +109,6 @@ class IState {
     virtual void on_enter(Context& ctx) {}
     virtual void on_exit(Context& ctx) {}
 };
-
-// 这个辅助函数的作用是：接收一整包参数，但只取前 N 个传给父状态
-template <typename ParentType, typename OutPath, typename ActivePath, typename ArgsTuple, std::size_t... Is>
-void call_parent_build_path(OutPath& out, const ActivePath& act, const ArgsTuple& args_tuple,
-                            std::index_sequence<Is...>) {
-    // std::get<Is> 会根据传入的 index_sequence，把 0 到 N-1 的参数解包出来传给父类
-    ParentType::build_path(out, act, std::get<Is>(args_tuple)...);
-}
 
 /*
 # 分析子类的AllowedEvents，根据状态进行分发，调用对应的on_event
@@ -152,6 +168,7 @@ class IEventHandler : public BaseInterface {
         }
         return false;
     }
+
     // 专门处理期望有返回值的的分支
     template <typename E, typename R>
     bool try_handle_ret(const std::any& event, Context& ctx, R& out_result) {
@@ -229,67 +246,55 @@ class BaseState : public IEventHandler<IState<Context>, Context, StateAction<Con
     StateAction<Context> step(Args&&... args) {
         return StateAction<Context>::template step<TargetState>(std::forward<Args>(args)...);
     }
+
     template <typename P = ParentState, typename = std::enable_if_t<!std::is_same_v<P, void>>>
     P* parent() {
         return static_cast<P*>(this->parent_ptr);
     }
 
-    // 静态路径构建 (支持层级参数传递与复用：按 父 -> 子 顺序传参)
     template <typename... Tuples>
-    static void build_path(std::vector<std::shared_ptr<IState<Context>>>& out_path,
-                           const std::vector<std::shared_ptr<IState<Context>>>& active_path, const Tuples&... args) {
-        // 1. 获取传入的所有 tuple 数量，并打包为引用的元组
+    static void build_path(IStatePathBuilder<Context>& builder, const Tuples&... args) {
         constexpr size_t NUM_ARGS = sizeof...(Tuples);
         auto args_tuple = std::tie(args...);
-        // 2. 递归构建父状态 (将前 NUM_ARGS - 1 个参数传给父状态)
+        // 1. 递归构建父状态
         if constexpr (!std::is_same_v<ParentState, void>) {
             if constexpr (NUM_ARGS > 1) {
-                // 调用外部的辅助函数，截取前面的参数给父节点
-                call_parent_build_path<ParentState>(out_path, active_path, args_tuple,
-                                                    std::make_index_sequence<NUM_ARGS - 1>{});
+                call_parent_build_path<ParentState>(builder, args_tuple, std::make_index_sequence<NUM_ARGS - 1>{});
             } else {
-                // 传进来的参数耗尽了（或者根本没传），父状态按空参数处理
-                ParentState::build_path(out_path, active_path);
+                ParentState::build_path(builder);
             }
         }
-        // 3. 提取当前状态的参数 (永远取最后一个 tuple 给自己)
+        // 2. 提取当前层级参数
         auto current_tuple = [&]() {
-            if constexpr (NUM_ARGS > 0) {
-                return std::get<NUM_ARGS - 1>(args_tuple);  // 准确拿到最后一个参数
-            } else {
-                return std::tuple<>{};  // 没参数时给个空的
-            }
+            if constexpr (NUM_ARGS > 0)
+                return std::get<NUM_ARGS - 1>(args_tuple);
+            else
+                return std::tuple<>{};
         }();
-        // 4. 判断当前层级是否可以复用 (运行期判断)
-        size_t current_depth = out_path.size();
+        // // 【修复重点】：提前在泛型 Lambda 外部提取好类型，避开 GCC 捕获推导 Bug
+        // using CurrentTupleType = decltype(current_tuple);
+        // 3. 判断复用还是构造
         std::string_view my_name = Derived::static_name();
-        if (current_depth < active_path.size() && active_path[current_depth]->name_view() == my_name) {
-            // 【命中缓存】：直接复用原有的智能指针，跳过构造！
-            out_path.push_back(active_path[current_depth]);
+        if (builder.try_reuse(my_name)) {
+            // 【命中缓存】：底层 Builder 内部会自动推进深度，什么都不用做
         } else {
-            // 【未命中缓存】：必须真正执行构造
-            auto state = std::apply(
-                [](auto&&... unpacked_args) -> std::shared_ptr<IState<Context>> {
-                    // 此时 current_tuple 里的参数就是精准给当前状态的了
+            // 【未命中缓存】：直接利用 builder 在内存池上分配并构造
+            std::apply(
+                [&](auto&&... unpacked_args) {
                     if constexpr (std::is_constructible_v<Derived, decltype(unpacked_args)...>) {
-                        return std::make_shared<Derived>(std::forward<decltype(unpacked_args)>(unpacked_args)...);
+                        builder.template emplace<Derived>(std::forward<decltype(unpacked_args)>(unpacked_args)...);
                     } else {
-                        // 不能匹配返回 nullptr，交给后面的安全校验处理
-                        return nullptr;
+                        // 使用外部提前定义好的 CurrentTupleType
+                        // meta_utils::print_type<CurrentTupleType>();
+
+                        // 或者更精准一点，打印出 unpacked_args 到底被推导成了什么类型组合：
+                        meta_utils::print_type<std::tuple<decltype(unpacked_args)...>>();
+
+                        throw std::logic_error("FATAL: Cannot construct state '" + std::string(my_name) + "'.");
                     }
                 },
                 current_tuple);
-
-            // 运行期安全校验
-            if (!state) {
-                meta_utils::print_type<decltype(current_tuple)>();
-                throw std::logic_error(
-                    "FATAL: State '" + std::string(my_name) +
-                    "' cannot be reused, but appropriate constructor arguments were NOT provided in step()!");
-            }
-            out_path.push_back(state);
         }
     }
 };
-
 }  // namespace dk

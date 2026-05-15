@@ -18,6 +18,7 @@
 #include <type_traits>
 #include <typeinfo>
 #include <unordered_map>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -46,91 +47,6 @@ overloaded(Ts...) -> overloaded<Ts...>;
 template <typename T>
 struct TypeTag {
     using type = T;
-};
-
-// Engine的抽象接口
-template <typename Context>
-class IEngine : public IAsyncRuntime {
-   protected:
-    virtual Future<bool> wait_internal(std::function<bool(const std::any&)> predicate, CancellationToken token) = 0;
-
-   private:
-    template <typename Visitor, typename... Ts>
-    static bool try_visit_any(Visitor& v, const std::any& any_event, bool& result_out, std::tuple<Ts...>) {
-        bool handled = false;
-        // 核心魔法：使用 auto 泛型 lambda 接收类型标签。
-        // lambda 内部没有任何模板参数包 Ts！完全与外部解耦！
-        auto check = [&](auto tag) -> bool {
-            using T = typename decltype(tag)::type;  // 从标签中把真实的事件类型 T 提炼出来
-            // 此时的 T 极其纯净，GCC 绝对不会报错
-            if (const T* concrete_event = std::any_cast<T>(&any_event)) {
-                using RetType = decltype(v(*concrete_event));
-
-                // 自动适配 void 和 bool 返回值
-                if constexpr (std::is_convertible_v<RetType, bool>) {
-                    result_out = v(*concrete_event);
-                } else {
-                    v(*concrete_event);
-                    result_out = true;
-                }
-                handled = true;
-                return true;  // 匹配成功，短路终止后续的查找
-            }
-            return false;  // 类型不匹配，告诉外层继续找
-        };
-        // 完美的包展开：只展开函数调用 check(TypeTag<T1>{}) || check(TypeTag<T2>{}) ...
-        (void)(check(TypeTag<Ts>{}) || ...);
-        return handled;
-    }
-
-   public:
-    virtual ~IEngine() = default;
-
-    virtual Context& get_context() = 0;
-
-    virtual void handle_event(const std::any& event, Context& ctx) = 0;
-
-    virtual void dispatch_internal(std::any e) = 0;
-
-    virtual void step_internal(const StateAction<Context>& action) = 0;
-
-    template <typename StateType, typename... Args>
-    void step(Args&&... args) {
-        // 利用 StateAction 的静态工厂完成“类型擦除”
-        StateAction<Context> action = StateAction<Context>::template step<StateType>(std::forward<Args>(args)...);
-        // 调用子类实现的非模板虚函数
-        this->step_internal(action);
-    }
-
-    // 获取当前的活跃路径 (从根到叶)
-    virtual const std::vector<std::shared_ptr<IState<Context>>>& get_active_states() const = 0;
-
-    // 获取叶子节点状态名字
-    virtual const std::string get_state_name() = 0;
-
-    // === 适配 std::any 的新一代多重 Lambda 等待黑魔法 ===
-    template <typename... Funcs>
-    Future<bool> wait(CancellationToken token, Funcs&&... funcs) {
-        auto user_visitor = overloaded{std::forward<Funcs>(funcs)...};
-        // 提取所有 Lambda 的期望参数类型
-        using ExpectedTypes = std::tuple<std::decay_t<typename lambda_traits<std::decay_t<Funcs>>::arg_type>...>;
-        // 包装给底层的 std::any 侦听器
-        auto any_wrapper = [v = std::move(user_visitor)](const std::any& any_event) mutable -> bool {
-            bool result = false;
-            // 通过 ExpectedTypes{} 空元组将类型包传递过去
-            bool handled = try_visit_any(v, any_event, result, ExpectedTypes{});
-            return handled ? result : false;
-        };
-        return wait_internal(std::move(any_wrapper), std::move(token));
-    }
-
-    template <typename... Funcs>
-    Future<bool> wait_for(uint32_t timeout_ms, Funcs&&... funcs) {
-        auto source = std::make_shared<CancellationTokenSource>();
-        auto token = source->get_token();
-        if (timeout_ms > 0) source->cancel_after(timeout_ms, this);
-        return wait(token, std::forward<Funcs>(funcs)...);
-    }
 };
 
 struct TickEvent {};
@@ -179,26 +95,29 @@ struct AsyncEvent {
     bool is_awaited() const { return promise_ != nullptr; }
 };
 
-template <typename Derived>
-struct BaseContext {
-    // 存放业务上下文数据
-    IEngine<Derived>* engine;
+struct WaitNode {
+    uint64_t id;
+    std::function<bool(const std::any&)> predicate;
+    std::shared_ptr<Promise<bool>> promise;
 };
 
-// 引入 CRTP 允许外部重写 Engine 的 on_event
-template <typename Context, typename DerivedEngine>
-class BaseEngine : public IEventHandler<IEngine<Context>, Context, void, DerivedEngine>,
-                   public std::enable_shared_from_this<BaseEngine<Context, DerivedEngine>> {
+// Engine的抽象接口，不需要Engine的真实类型
+template <typename Context, size_t MaxDepth = 10, size_t MemorySize = 65536>
+class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
    private:
-    using StatePtr = std::shared_ptr<IState<Context>>;
-    using EventListenerPtr = std::shared_ptr<IEventListener<Context>>;
-    Context ctx_;
-    std::vector<StatePtr> active_states_;
-    std::atomic<bool> running_{false};
-    std::vector<EventListenerPtr> listeners_;  // 和状态无关的监听器
+    struct StateNode {
+        IState<Context>* state = nullptr;
+        void (*destroy_fn)(IState<Context>*) = nullptr;
+        size_t mem_offset = 0;
+    };
+    alignas(16) std::byte memory_arena_[MemorySize];
+    size_t current_offset_ = 0;
 
-    // 引入 Asio 的绝对核心：I/O 上下文
-    boost::asio::io_context io_context_;
+    size_t build_depth_ = 0;
+    bool divergence_found_ = false;
+
+    std::atomic<bool> running_{false};
+
     std::optional<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>> work_guard_;
     std::optional<boost::asio::steady_timer> tick_timer_;
     std::chrono::milliseconds tick_interval_;
@@ -207,139 +126,147 @@ class BaseEngine : public IEventHandler<IEngine<Context>, Context, void, Derived
     std::optional<std::unique_ptr<boost::asio::thread_pool>> workflow_pool_;
     std::thread::id event_thread_id_;  // 事件循环的thread id, 用于检测wait
 
-    struct WaitNode {
-        uint64_t id;
-        std::function<bool(const std::any&)> predicate;
-        std::shared_ptr<Promise<bool>> promise;
-    };
+   protected:
+    Context ctx_;
+    size_t active_depth_ = 0;
+    std::array<StateNode, MaxDepth> active_path_;
+
+    // Buffer for transition requested during an active transition (e.g., inside on_enter/on_exit)
+    std::optional<StateAction<Context>> pending_transition_;
+    using EventListenerPtr = std::shared_ptr<IEventListener<Context>>;
+    std::vector<EventListenerPtr> listeners_;  // 和状态无关的监听器
+
+    // 引入 Asio 的绝对核心：I/O 上下文
+    boost::asio::io_context io_context_;
     // 保存所有正在等待的请求。使用 map 是为了 O(1) 的删除效率
     std::unordered_map<uint64_t, std::shared_ptr<WaitNode>> active_waits_;
     uint64_t next_wait_id_ = 0;
 
     int step_call_level_ = 0;  // step调用层数
+    struct StepLevelGuard {
+        int& level;
+        StepLevelGuard(int& l) : level(l) { level++; }
+        ~StepLevelGuard() { level--; }
+    };
 
-    // Buffer for transition requested during an active transition (e.g., inside on_enter/on_exit)
-    std::optional<StateAction<Context>> pending_transition_;
+    virtual void process_internal(const std::any& e) = 0;
 
-   private:
-    // LCA (最近公共祖先) 状态树跳转计算
+    virtual Future<bool> wait_internal(std::function<bool(const std::any&)> predicate, CancellationToken token) = 0;
+
+    // IStatePathBuilder 接口实现（含生命周期事件派发）
+    size_t get_memory_mark() const override { return current_offset_; }
+    void* allocate_bytes(size_t size, size_t alignment) override {
+        size_t aligned_offset = (current_offset_ + alignment - 1) & ~(alignment - 1);
+        if (aligned_offset + size > MemorySize) return nullptr;
+        void* ptr = memory_arena_ + aligned_offset;
+        current_offset_ = aligned_offset + size;
+        return ptr;
+    }
+
+    bool try_reuse(std::string_view state_name) override {
+        if (!divergence_found_ && build_depth_ < active_depth_ &&
+            active_path_[build_depth_].state->name_view() == state_name) {
+            build_depth_++;
+            return true;
+        }
+        if (!divergence_found_) {
+            divergence_found_ = true;
+            // 【分歧点发现】：立刻向上逐级退出旧节点
+            while (active_depth_ > build_depth_) {
+                pop_state();
+            }
+        }
+        return false;
+    }
+
+    void push_new_state(IState<Context>* state, void (*destroy_fn)(IState<Context>*), size_t original_offset) override {
+        state->parent_ptr = (active_depth_ > 0) ? active_path_[active_depth_ - 1].state : nullptr;
+
+        active_path_[active_depth_] = {state, destroy_fn, original_offset};
+        active_depth_++;
+        build_depth_++;
+        // 【生命周期】：触发 Enter 事件和回调 (由于 step_call_level_ 大于 0，这里引发的跳转会被 pending 缓存)
+        process_internal(std::make_any<EnterEvent>(EnterEvent{state->name()}));
+        state->on_enter(ctx_);
+    }
+
+    void pop_state() {
+        if (active_depth_ == 0) return;
+        auto& node = active_path_[active_depth_ - 1];
+
+        // 【生命周期】：触发 Exit 事件和回调
+        node.state->on_exit(ctx_);
+        process_internal(std::make_any<ExitEvent>(ExitEvent{node.state->name()}));
+        if (node.destroy_fn) node.destroy_fn(node.state);  // 析构
+
+        current_offset_ = node.mem_offset;  // 完美退还内存
+        active_depth_--;
+    }
+
+    // 核心：极度简化的状态跳转控制循环
     void execute_transition(StateAction<Context> action) {
         try {
             if (step_call_level_ != 0) {
-                // Buffer the transition request to be processed by the active loop
+                // 如果处于事件冒泡或生命周期回调期间，缓存跳转意图
                 pending_transition_ = std::move(action);
                 return;
             }
-
-            step_call_level_++;
-            while (true) {
+            StepLevelGuard guard(step_call_level_);
+            while (action.path_builder) {
                 pending_transition_.reset();
-                std::vector<StatePtr> new_path;
-                action.path_builder(new_path, active_states_);
-                size_t lca_idx = 0;
-                size_t min_len = std::min(active_states_.size(), new_path.size());
-                while (lca_idx < min_len && active_states_[lca_idx] == new_path[lca_idx]) {
-                    lca_idx++;
-                }
 
-                std::string prev_leaf = active_states_.empty() ? "UNKNOWN" : active_states_.back()->name();
-                for (size_t i = active_states_.size(); i > lca_idx; --i) {
-                    auto s = active_states_[i - 1];
-                    s->on_exit(ctx_);
-                    process_internal(std::make_any<ExitEvent>(ExitEvent{s->name()}));
+                std::string prev_leaf = get_state_name();
+                // 初始化构建环境
+                build_depth_ = 0;
+                divergence_found_ = false;
+                // 【魔法时刻】：一行代码自动完成 LCA 比对、旧状态 Pop 退栈、新状态 Push 入栈
+                action.path_builder(*this);
+                // 如果新路径比旧路径短，把多余的尾巴截断退出
+                while (active_depth_ > build_depth_) {
+                    pop_state();
                 }
-                if (pending_transition_.has_value()) {
-                    // Transition hijacked during on_exit, abort entering new states
-                    new_path.resize(lca_idx);
-                } else {
-                    for (size_t i = lca_idx; i < new_path.size(); ++i) {
-                        auto s = new_path[i];
-                        s->parent_ptr = i >= 1 ? new_path[i - 1].get() : nullptr;
-
-                        process_internal(std::make_any<EnterEvent>(EnterEvent{s->name()}));
-                        s->on_enter(ctx_);
-                        if (pending_transition_.has_value()) {
-                            // Transition hijacked during on_enter, truncate path to current state
-                            new_path.resize(i + 1);
-                            break;
-                        }
-                    }
-                }
-                std::string next_leaf = new_path.empty() ? "UNKNOWN" : new_path.back()->name();
-                active_states_ = std::move(new_path);
-
+                std::string next_leaf = get_state_name();
                 process_internal(std::make_any<StateChangeEvent>(StateChangeEvent{prev_leaf, next_leaf}));
                 if (pending_transition_.has_value()) {
-                    // Continue the loop with the hijacked transition
+                    // 如果在上述的 pop_state(on_exit) 或 push_new_state(on_enter) 中发生了新的跳转
                     action = std::move(*pending_transition_);
                 } else {
-                    // All transitions completed successfully
-                    break;
+                    break;  // 跳转彻底结束
                 }
             }
-            step_call_level_--;
         } catch (const std::exception& e) {
             step_call_level_ = 0;
             std::cout << "[Engine]: transition error: " << e.what() << std::endl;
         }
     }
 
-    void process_internal(const std::any& e) {
-        // 1. 触发 Wait 系统 (纯异步无状态修改，无需拦截)
-        for (auto it = active_waits_.begin(); it != active_waits_.end();) {
-            if (it->second->promise->state() != PromiseState::PENDING) {
-                it = active_waits_.erase(it);
-            } else if (it->second->predicate(e)) {
-                it->second->promise->resolve(true);
-                it = active_waits_.erase(it);
-            } else {
-                ++it;
-            }
-        }
-        // =======================================================
-        // === 开启事件处理周期的统一防护：所有显式跳转转为缓存 ===
-        // =======================================================
-        step_call_level_++;
-        StateAction<Context> final_transition = StateAction<Context>::unhandled();
-        // 2. 触发全局无状态监听器
-        for (auto& listener : listeners_) {
-            listener->handle_event(e, ctx_);
-        }
-        // 3. 触发引擎自身的拦截 (BaseEngine 继承自 IEventHandler)
-        if (!pending_transition_.has_value()) {
-            this->handle_event(e, ctx_);
-        }
-        // 4. HSM 事件冒泡核心：从【叶子节点】向【根节点】逐级探测
-        if (!pending_transition_.has_value()) {
-            for (auto it = active_states_.rbegin(); it != active_states_.rend(); ++it) {
-                StateAction<Context> action = (*it)->handle_event(e, ctx_);
-                if (action.type == StateAction<Context>::Type::TRANSITION) {
-                    // 【规则1】：Return 的意图优先级最高，覆盖之前任何可能缓存的显式 step 调用
-                    final_transition = action;
-                    pending_transition_.reset();
-                    break;
-                } else if (pending_transition_.has_value()) {
-                    // 【规则2】：状态内部显式调用了 step()，但没有 return 导致它被捕获
-                    final_transition = std::move(*pending_transition_);
-                    pending_transition_.reset();
-                    break;  // 状态已被切换意图截断，停止冒泡
-                } else if (action.type == StateAction<Context>::Type::HANDLED) {
-                    break;  // 事件被吞噬，终止冒泡
+   private:
+    template <typename Visitor, typename... Ts>
+    static bool try_visit_any(Visitor& v, const std::any& any_event, bool& result_out, std::tuple<Ts...>) {
+        bool handled = false;
+        // 核心魔法：使用 auto 泛型 lambda 接收类型标签。
+        // lambda 内部没有任何模板参数包 Ts！完全与外部解耦！
+        auto check = [&](auto tag) -> bool {
+            using T = typename decltype(tag)::type;  // 从标签中把真实的事件类型 T 提炼出来
+            // 此时的 T 极其纯净，GCC 绝对不会报错
+            if (const T* concrete_event = std::any_cast<T>(&any_event)) {
+                using RetType = decltype(v(*concrete_event));
+
+                // 自动适配 void 和 bool 返回值
+                if constexpr (std::is_convertible_v<RetType, bool>) {
+                    result_out = v(*concrete_event);
+                } else {
+                    v(*concrete_event);
+                    result_out = true;
                 }
+                handled = true;
+                return true;  // 匹配成功，短路终止后续的查找
             }
-        } else {
-            // 如果在全局监听器或引擎监听器中发生了跳转，直接提取
-            final_transition = std::move(*pending_transition_);
-            pending_transition_.reset();
-        }
-        // =======================================================
-        // === 防护解除，统一结算状态树 ===
-        // =======================================================
-        step_call_level_--;
-        // 如果最终决议需要发生跳转，在这里绝对安全地执行！
-        if (final_transition.type == StateAction<Context>::Type::TRANSITION) {
-            execute_transition(final_transition);
-        }
+            return false;  // 类型不匹配，告诉外层继续找
+        };
+        // 完美的包展开：只展开函数调用 check(TypeTag<T1>{}) || check(TypeTag<T2>{}) ...
+        (void)(check(TypeTag<Ts>{}) || ...);
+        return handled;
     }
 
     void schedule_next_tick() {
@@ -354,24 +281,17 @@ class BaseEngine : public IEventHandler<IEngine<Context>, Context, void, Derived
     }
 
    public:
-    virtual ~BaseEngine() { stop(); }
+    ~IEngine() { stop(); };
 
-    using AllowedEvents = std::tuple<>;
+    Context& get_context() { return ctx_; }
 
-    const std::vector<StatePtr>& get_active_states() const override { return active_states_; }
-
-    const std::string get_state_name() override {
-        if (!active_states_.empty()) {
-            return (*active_states_.back()).name();
-        }
-        return "UNKNOWN";
+    void add_listener(EventListenerPtr listener) {
+        boost::asio::post(io_context_, [this, listener]() { this->listeners_.push_back(listener); });
     }
 
-    Context& get_context() override { return ctx_; }
+    virtual void handle_event(const std::any& event, Context& ctx) = 0;
 
     boost::asio::io_context& get_ioc() { return io_context_; }
-
-    void add_listener(EventListenerPtr listener) { listeners_.push_back(listener); }
 
     std::thread::id get_thread_id() override { return event_thread_id_; }
 
@@ -397,53 +317,76 @@ class BaseEngine : public IEventHandler<IEngine<Context>, Context, void, Derived
                           [this, ev = std::make_any<Event>(std::move(e))]() mutable { this->process_internal(ev); });
     }
 
-    // 2. 异步派发：【在塞入队列前，给 Event 注入 Promise！】
-    template <typename E>
-    Future<typename E::ReturnType> dispatch_async(E e, uint32_t timeout_ms = 5000) {
-        static_assert(std::is_base_of_v<AsyncEvent<typename E::ReturnType>, E>,
-                      "Event must inherit from dk::AsyncEvent to use dispatch_async!");
-        using R = typename E::ReturnType;
-        auto promise = std::make_shared<Promise<R>>(this);
-        Future<R> future = promise->get_future();
+    template <typename StateType, typename... Args>
+    void step(Args&&... args) {
+        // 利用 StateAction 的静态工厂完成“类型擦除”
+        StateAction<Context> action = StateAction<Context>::template step<StateType>(std::forward<Args>(args)...);
+        // 调用子类实现的非模板虚函数
+        this->step_internal(action);
+    }
 
-        // 【关键注入】：赋予这个普通事件以异步返回的超能力
-        e.promise_ = promise;
-        if (timeout_ms > 0) {
-            future = future.timeout(timeout_ms);
+    const std::vector<IState<Context>*> get_active_states_view() const {
+        std::vector<IState<Context>*> view;
+        view.reserve(active_depth_);
+        for (size_t i = 0; i < active_depth_; ++i) {
+            view.push_back(active_path_[i].state);
         }
-        boost::asio::post(io_context_, [this, e = std::move(e)]() mutable { this->process_internal(e); });
-
-        return future;
+        return view;
     }
 
-    // 提交一个后台任务，在线程池而不是事件循环中进行
-    template <typename ReturnType>
+    const std::string get_state_name() {
+        if (active_depth_ > 0) {
+            return active_path_[active_depth_ - 1].state->name();
+        }
+        return "UNKNOWN";
+    }
+
+    template <typename StateType>
+    bool is_active_state() {
+        auto states = get_active_states_view();
+        for (auto* s : states) {
+            if (dynamic_cast<StateType*>(s)) return true;
+        }
+        return false;
+    }
+
+    // === 适配 std::any 的新一代多重 Lambda 等待黑魔法 ===
+    template <typename... Funcs>
+    Future<bool> wait(CancellationToken token, Funcs&&... funcs) {
+        auto user_visitor = overloaded{std::forward<Funcs>(funcs)...};
+        // 提取所有 Lambda 的期望参数类型
+        using ExpectedTypes = std::tuple<std::decay_t<typename lambda_traits<std::decay_t<Funcs>>::arg_type>...>;
+        // 包装给底层的 std::any 侦听器
+        auto any_wrapper = [v = std::move(user_visitor)](const std::any& any_event) mutable -> bool {
+            bool result = false;
+            // 通过 ExpectedTypes{} 空元组将类型包传递过去
+            bool handled = try_visit_any(v, any_event, result, ExpectedTypes{});
+            return handled ? result : false;
+        };
+        return wait_internal(std::move(any_wrapper), std::move(token));
+    }
+
+    template <typename... Funcs>
+    Future<bool> wait_for(uint32_t timeout_ms, Funcs&&... funcs) {
+        auto source = std::make_shared<CancellationTokenSource>();
+        auto token = source->get_token();
+        if (timeout_ms > 0) source->cancel_after(timeout_ms, this);
+        return wait(token, std::forward<Funcs>(funcs)...);
+    }
+
+    // For non-void ReturnType
+    template <typename ReturnType, std::enable_if_t<!std::is_same<ReturnType, void>::value, int> = 0>
     Future<ReturnType> post_background_task(std::function<ReturnType()> task) {
-        std::shared_ptr<Promise<ReturnType>> promise = std::make_shared<Promise<ReturnType>>(this);
-        boost::asio::post(this->workflow_pool_.value(), [task, engine = this, promise]() {
-            // --- 此时运行在【后台计算线程】，你可以随便算几秒，绝对不卡主线程 ---
+        std::shared_ptr<IEngine> self_ptr(this, [](IEngine*) {});
+        std::shared_ptr<Promise<ReturnType>> promise = std::make_shared<Promise<ReturnType>>(self_ptr);
+        boost::asio::post(*this->workflow_pool_.value(), [task, engine = this, promise]() {
+            // Execute background task
             ReturnType data = task();
-            // --- 算完啦！重点来了：必须安全地把结果送回主线程！ ---
-            // 绝对不能在这里直接调 e.resolve() 或者修改 ctx，因为会破坏单线程无锁设计！
-            // 利用引擎的主 io_context，把完成的事件 post 回去
-            boost::asio::post(engine->io_context_, [data, promise]() {
-                // --- 此时又回到了【主事件循环线程】！ ---
-                // 极其安全地完成 Promise
-                promise->resolve(data);
-            });
+            // Return result safely to main io_context
+            boost::asio::post(engine->io_context_,
+                              [data = std::move(data), promise]() mutable { promise->resolve(std::move(data)); });
         });
-        return promise->get_futrue();
-    }
-
-    // 为若干个事件注册【一个】监听器，如果return False则继续监听
-    Future<bool> wait_internal(std::function<bool(const std::any&)> predicate, CancellationToken token) override {
-        auto promise = std::make_shared<Promise<bool>>(this, token);
-        Future<bool> future = promise->get_future();
-        boost::asio::post(io_context_, [this, predicate = std::move(predicate), promise]() {
-            uint64_t id = ++next_wait_id_;
-            active_waits_[id] = std::make_shared<WaitNode>(WaitNode{id, std::move(predicate), promise});
-        });
-        return future;
+        return promise->get_future();
     }
 
     // ====== 引擎生命周期 ======
@@ -451,36 +394,44 @@ class BaseEngine : public IEventHandler<IEngine<Context>, Context, void, Derived
     void start(std::chrono::milliseconds tick_interval, Args&&... args) {
         bool expected = false;
         if (!running_.compare_exchange_strong(expected, true)) return;
-
         tick_interval_ = tick_interval;
-        std::promise<void> init_promise;
-        std::future<void> init_future = init_promise.get_future();
 
-        worker_thread_ = std::thread([this, &init_promise](auto... args) {
-            try {
-                this->ctx_.engine = this;
-                event_thread_id_ = std::this_thread::get_id();
-                work_guard_.emplace(boost::asio::make_work_guard(io_context_));
-                tick_timer_.emplace(io_context_);
-                workflow_pool_.emplace(std::make_unique<boost::asio::thread_pool>(4));
+        // Use shared_ptr to prevent dangling reference if exception occurs later
+        auto init_promise = std::make_shared<std::promise<void>>();
+        std::future<void> init_future = init_promise->get_future();
+        // Pass arguments into std::thread, lambda accepts them as thread_args
+        worker_thread_ = std::thread(
+            [this, init_promise](auto&&... thread_args) {
+                bool promise_fulfilled = false;  // Track promise state to avoid std::future_error
+                try {
+                    event_thread_id_ = std::this_thread::get_id();
+                    work_guard_.emplace(boost::asio::make_work_guard(io_context_));
+                    tick_timer_.emplace(io_context_);
+                    workflow_pool_.emplace(std::make_unique<boost::asio::thread_pool>(4));
+                    schedule_next_tick();
+                    // Forward the thread_args to the initial transition
+                    execute_transition(StateAction<Context>::template step<RootState>(
+                        std::forward<decltype(thread_args)>(thread_args)...));
 
-                schedule_next_tick();
+                    init_promise->set_value();
+                    promise_fulfilled = true;
 
-                // 【核心变化 3】：启动时，利用伪造的 step 跳转到初始状态
-                execute_transition(StateAction<Context>::template step<RootState>(std::forward<Args>(args)...));
-
-                init_promise.set_value();
-                io_context_.run();
-            } catch (const std::exception& e) {
-                running_ = false;
-                std::cout << "[Engine]: fatal error: " << e.what() << std::endl;
-                init_promise.set_exception(std::current_exception());
-            } catch (...) {
-                running_ = false;
-                std::cout << "[Engine]: Unknown exception type without what() interface.\n";
-                init_promise.set_exception(std::current_exception());
-            }
-        });
+                    io_context_.run();
+                } catch (const std::exception& e) {
+                    running_ = false;
+                    std::cout << "[Engine]: fatal error: " << e.what() << std::endl;
+                    if (!promise_fulfilled) {
+                        init_promise->set_exception(std::current_exception());
+                    }
+                } catch (...) {
+                    running_ = false;
+                    std::cout << "[Engine]: Unknown exception type without what() interface.\n";
+                    if (!promise_fulfilled) {
+                        init_promise->set_exception(std::current_exception());
+                    }
+                }
+            },
+            std::forward<Args>(args)...);  // Standard way to pass args to std::thread
         init_future.get();
     }
 
@@ -509,7 +460,7 @@ class BaseEngine : public IEventHandler<IEngine<Context>, Context, void, Derived
         }
     }
 
-    void step_internal(const StateAction<Context>& action) override {
+    void step_internal(const StateAction<Context>& action) {
         // 保留原先在 step() 里的线程安全检查
         if (std::this_thread::get_id() != event_thread_id_) {
             throw std::logic_error(
@@ -520,9 +471,110 @@ class BaseEngine : public IEventHandler<IEngine<Context>, Context, void, Derived
         execute_transition(action);
     }
 
-    void dispatch_internal(std::any e) override {
+    void dispatch_internal(std::any e) {
         // asio::defer 告诉 Asio：这是一个后续任务，请优先在当前调用栈结束后执行！
         boost::asio::defer(io_context_, [this, e = std::move(e)]() mutable { this->process_internal(e); });
+    }
+};
+
+// 引入 CRTP 允许外部重写 Engine 的 on_event
+template <typename Context, typename DerivedEngine>
+class BaseEngine : public IEventHandler<IEngine<Context>, Context, void, DerivedEngine>,
+                   public std::enable_shared_from_this<BaseEngine<Context, DerivedEngine>> {
+   private:
+    // 使用子类类型作为模板参数，因为用到handle_event
+    void process_internal(const std::any& e) {
+        // 1. 触发 Wait 系统 (纯异步无状态修改，无需拦截)
+        std::vector<std::shared_ptr<Promise<bool>>> to_resolve;
+        for (auto it = this->active_waits_.begin(); it != this->active_waits_.end();) {
+            if (it->second->promise->state() != PromiseState::PENDING) {
+                it = this->active_waits_.erase(it);
+            } else if (it->second->predicate(e)) {
+                to_resolve.push_back(it->second->promise);  // 先收集
+                it = this->active_waits_.erase(it);         // 安全删除
+            } else {
+                ++it;
+            }
+        }
+        // 循环外再执行回调，此时无论外部怎么修改 active_waits_ 都是安全的
+        for (auto& p : to_resolve) {
+            p->resolve(true);
+        }
+        // =======================================================
+        // === 开启事件处理周期的统一防护：所有显式跳转转为缓存 ===
+        // =======================================================
+        StateAction<Context> final_transition = StateAction<Context>::unhandled();
+        // 2. 触发全局无状态监听器
+        for (auto& listener : this->listeners_) {
+            listener->handle_event(e, this->ctx_);
+        }
+        // 3. 触发引擎自身的拦截 (BaseEngine 继承自 IEventHandler)
+        if (!this->pending_transition_.has_value()) {
+            this->handle_event(e, this->ctx_);
+        }
+        // 4. HSM 事件冒泡核心：从数组尾部（叶子）向头部（根）冒泡
+        if (!this->pending_transition_.has_value()) {
+            for (int i = this->active_depth_ - 1; i >= 0; --i) {
+                StateAction<Context> action = this->active_path_[i].state->handle_event(e, this->ctx_);
+                if (action.type == StateAction<Context>::Type::TRANSITION) {
+                    final_transition = action;
+                    this->pending_transition_.reset();
+                    break;
+                } else if (this->pending_transition_.has_value()) {
+                    final_transition = std::move(*(this->pending_transition_));
+                    this->pending_transition_.reset();
+                    break;
+                } else if (action.type == StateAction<Context>::Type::HANDLED) {
+                    break;
+                }
+            }
+        } else {
+            final_transition = std::move(*(this->pending_transition_));
+            this->pending_transition_.reset();
+        }
+        // =======================================================
+        // === 防护解除，统一结算状态树 ===
+        // =======================================================
+
+        // 如果最终决议需要发生跳转，在这里绝对安全地执行！
+        if (final_transition.type == StateAction<Context>::Type::TRANSITION) {
+            this->execute_transition(final_transition);
+        }
+    }
+
+   public:
+    using AllowedEvents = std::tuple<>;
+
+    // 使用子类类型作为模板参数，因为使用了shared_from_this
+    // 2. 异步派发：【在塞入队列前，给 Event 注入 Promise！】
+    template <typename E>
+    Future<typename E::ReturnType> dispatch_async(E e, uint32_t timeout_ms = 5000) {
+        static_assert(std::is_base_of_v<AsyncEvent<typename E::ReturnType>, E>,
+                      "Event must inherit from dk::AsyncEvent to use dispatch_async!");
+        using R = typename E::ReturnType;
+        auto promise = std::make_shared<Promise<R>>(this->shared_from_this());
+        Future<R> future = promise->get_future();
+
+        // 【关键注入】：赋予这个普通事件以异步返回的超能力
+        e.promise_ = promise;
+        if (timeout_ms > 0) {
+            future = future.timeout(timeout_ms);
+        }
+        boost::asio::post(this->io_context_, [this, e = std::move(e)]() mutable { this->process_internal(e); });
+
+        return future;
+    }
+
+    // 使用到了真实类型作为模板参数
+    // 为若干个事件注册【一个】监听器，如果return False则继续监听
+    Future<bool> wait_internal(std::function<bool(const std::any&)> predicate, CancellationToken token) override {
+        auto promise = std::make_shared<Promise<bool>>(this->shared_from_this(), token);
+        Future<bool> future = promise->get_future();
+        boost::asio::post(this->io_context_, [this, predicate = std::move(predicate), promise]() {
+            uint64_t id = ++(this->next_wait_id_);
+            this->active_waits_[id] = std::make_shared<WaitNode>(WaitNode{id, std::move(predicate), promise});
+        });
+        return future;
     }
 };
 

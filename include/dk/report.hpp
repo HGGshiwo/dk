@@ -91,6 +91,54 @@ class StateRegistry {
     }
 };
 
+template <typename T>
+class ThreadVar {
+   private:
+    T data_;
+    mutable std::shared_mutex mtx_;
+
+   public:
+    // 构造1：标准 JSON 键值对上报
+    ThreadVar(T init_val = T{}) : data_(std::move(init_val)) {}
+
+    template <typename U>
+    ThreadVar& operator=(U&& value) {
+        data_ = std::forward<U>(value);
+        return *this;
+    }
+
+    template <typename Func>
+    decltype(auto) write(Func&& func) {
+        static_assert(std::is_invocable_v<Func, T&>, "write callback error: Argument must be T&!");
+        static_assert(!std::is_invocable_v<Func, T>, "write callback error: Argument must be T& or auto&!");
+        // 定义一个 RAII 结构体，在函数结束（无论正常返回还是抛异常）时设置 dirty_
+        // 直接返回。如果 func 返回 void，decltype(auto) 也能推导为 void 并合法执行
+        return [&]() -> decltype(auto) {
+            std::unique_lock<std::shared_mutex> lock(mtx_);
+            return std::forward<Func>(func)(data_);
+        }();
+    }
+
+    template <typename Func>
+    decltype(auto) read(Func&& func) const {
+        static_assert(std::is_invocable_v<Func, const T&>, "read callback error: Argument must be const T&!");
+        std::shared_lock<std::shared_mutex> lock(mtx_);
+        return std::forward<Func>(func)(data_);
+    }
+
+    T get() const {
+        std::shared_lock<std::shared_mutex> lock(mtx_);
+        return data_;
+    }
+
+    void set(T data) {
+        {
+            std::unique_lock<std::shared_mutex> lock(mtx_);
+            data_ = std::move(data);
+        }
+    }
+};
+
 // 全新升级的 TrackedVar：继承自 thread_safe 的思想，增加脏写和自动注册
 template <typename T>
 class TrackedVar : public IReportable {

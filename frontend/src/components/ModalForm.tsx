@@ -35,7 +35,7 @@ export interface FormItemConfig {
   min?: number; // 数值/滑块最小值
   step?: number; // 数值/滑块步长
 
-  options?: Record<string, any> | object; // 下拉框选项
+  options?: any[]; // 下拉框选项
   required?: boolean; // 是否必填（扩展字段）
   transform?: "json" | "JSON"; //需要转换的格式
   columns?: Record<string, Record<string, any>>;
@@ -82,9 +82,9 @@ export const getInput = (item: FormItemConfig, res: Record<string, any>) => {
       return (
         <Select
           options={
-            Object.entries(res?.options || item.options || {}).map(
-              ([key, option]) => ({
-                value: key,
+            (res?.options || item.options || []).map(
+              (option: any) => ({
+                value: option.key,
                 label: option,
               }),
             ) || []
@@ -95,9 +95,9 @@ export const getInput = (item: FormItemConfig, res: Record<string, any>) => {
     case "radio":
       return (
         <Radio.Group>
-          {Object.entries(res?.options || item.options || {}).map(
-            ([key, option]) => (
-              <Radio value={key}>{option as any}</Radio>
+          {(res?.options || item.options || {}).map(
+            (option: any) => (
+              <Radio value={option.key}>{option.name}</Radio>
             ),
           )}
         </Radio.Group>
