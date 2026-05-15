@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { WSStatus } from "./components/WSStatus";
 import { StateDisplay } from "./components/StateDisplay";
 import { ButtonGroup } from "./components/ButtonGroup";
@@ -9,6 +9,8 @@ import { ConfigProvider, Spin, type ThemeConfig } from "antd";
 import WaypointEditor from "./components/WaypointEditor";
 
 function App() {
+  const [isWaypointEditing, setIsWaypointEditing] = useState(false);
+  
   const theme: ThemeConfig = {
     components: {
       Card: { headerFontSize: "18px" },
@@ -30,15 +32,33 @@ function App() {
       delay={500}
       size="large"
       tip="尝试websocket连接中..."
+      style={{ width: '100%', height: '100%' }}
     >
       <ConfigProvider theme={theme}>
-        <div className="w-full h-full flex flex-col gap-2">
-          <WSStatus />
-          <ButtonGroup />
-          <StateDisplay />
-          <VirtualJoystickGroup />
-          <LogOutputBox /> 
-          <WaypointEditor />
+        <div style={{ width: '100%', height: '100%', position: 'relative', overflow: 'hidden' }}>
+          {/* Canvas全屏背景 */}
+          <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 0 }}>
+            <WaypointEditor onEditModeChange={setIsWaypointEditing} />
+          </div>
+          
+          {/* 顶部状态显示 - 绝对定位 */}
+          <div style={{ position: 'absolute', top: 0, left: 0, right: 0, zIndex: 10, pointerEvents: 'none' }}>
+            <WSStatus />
+            <StateDisplay />
+          </div>
+          
+          {/* 底部按钮卡片 - 绝对定位，编辑模式时隐藏 */}
+          {!isWaypointEditing && (
+            <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 20, padding: '16px' }}>
+              <ButtonGroup />
+            </div>
+          )}
+          
+          {/* 隐藏的组件 - 如果需要可以调整 */}
+          <div className="hidden">
+            <VirtualJoystickGroup />
+            <LogOutputBox />
+          </div>
         </div>
       </ConfigProvider>
     </Spin>

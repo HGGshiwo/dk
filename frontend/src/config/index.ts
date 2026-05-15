@@ -30,7 +30,9 @@ export interface WaypointVisConfig {
 
 // 全局配置接口
 export interface GlobalConfig {
-  state: StateItemConfig[]; // 状态展示配置
+  state: StateItemConfig[]; // 状态展示配置（key: value 格式）
+  state_bool?: StateItemConfig[]; // 布尔状态展示配置
+  state_value?: StateItemConfig[]; // 仅显示值的状态展示配置
   button: ButtonItemConfig[]; // 控制按钮配置
   joystick: JoystickItemConfig[]; //虚拟摇杆操作配置
   logbox: LogTypeConfig[]; // 日志框的配置

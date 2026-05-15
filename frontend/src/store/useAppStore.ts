@@ -158,6 +158,23 @@ export const useAppStore = create<AppState>((set, get) => ({
           },
           {} as Record<string, string>,
         );
+        
+        // 初始化 state_bool 的默认值
+        if (config?.state_bool) {
+          const stateBoolEntries = sortByOrder(config.state_bool);
+          stateBoolEntries.forEach((item) => {
+            initStateData[item.key] = item.default;
+          });
+        }
+        
+        // 初始化 state_value 的默认值
+        if (config?.state_value) {
+          const stateValueEntries = sortByOrder(config.state_value);
+          stateValueEntries.forEach((item) => {
+            initStateData[item.key] = item.default;
+          });
+        }
+        
         set({ stateData: initStateData });
       }
 

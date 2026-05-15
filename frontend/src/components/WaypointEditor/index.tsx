@@ -7,7 +7,6 @@ import {
   Space,
   message,
   Radio,
-  Card,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import "./WaypointEditor.css";
@@ -39,9 +38,10 @@ interface ViewState {
   scale: number;
 }
 
-interface WaypointEditorProps {
+export interface WaypointEditorProps {
   waypointSubmitUrl?: string;
   followSubmitUrl?: string;
+  onEditModeChange?: (isEditing: boolean) => void; // 新增回调
 }
 
 const HIT_TOLERANCE = 10;
@@ -57,8 +57,15 @@ const METERS_PER_DEGREE_LON = (lat: number) =>
 const WaypointEditor: React.FC<WaypointEditorProps> = ({
   waypointSubmitUrl = "/set_waypoint",
   followSubmitUrl = "/set_posvel",
+  onEditModeChange,
 }) => {
   const [mode, setMode] = useState<"waypoint" | "follow">("waypoint");
+  const [showWaypointPanel, setShowWaypointPanel] = useState(false); // 控制航点面板显示
+
+  // 当编辑模式改变时通知父组件
+  useEffect(() => {
+    onEditModeChange?.(showWaypointPanel);
+  }, [showWaypointPanel, onEditModeChange]);
 
   const [isEditing, setIsEditing] = useState(false);
   const mission_data = useAppStore((state) => state.stateData.mission_data);
@@ -969,34 +976,60 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
   }, [originRef, requestRedraw]);
 
   return (
-    <Card
-      title="航点编辑"
-      className="mb-2 w-full"
-      variant="borderless"
-      style={{ boxShadow: "0 2px 8px rgba(0,0,0,0.08)" }}
-    >
-      <div
-        className="waypoint-editor sm:flex-col md:flex-row"
-        ref={containerRef}
-      >
-        <div className="canvas-container">
-          <canvas
-            ref={canvasRef}
-            className="canvas"
-            onMouseDown={handleMouseDown}
-            onMouseMove={handleMouseMove}
-            onMouseUp={handleMouseUp}
-            onMouseLeave={handleMouseLeave}
-            onContextMenu={handleContextMenu}
-          />
-          <div className="canvas-controls">
-            <Button size="small" ref={btnRef}>
-              重置视图
-            </Button>
-          </div>
+    <div className="waypoint-editor-fullscreen" ref={containerRef}>
+      <div className="canvas-container-fullscreen">
+        <canvas
+          ref={canvasRef}
+          className="canvas"
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          onMouseLeave={handleMouseLeave}
+          onContextMenu={handleContextMenu}
+        />
+        <div className="canvas-controls">
+          <Button size="small" ref={btnRef}>
+            重置视图
+          </Button>
         </div>
-        <div className="sidebar">
-          <div className="mode-switch">
+        
+        {/* 右侧悬浮的航点编辑按钮 */}
+        <div style={{
+          position: 'absolute',
+          top: '50%',
+          right: '16px',
+          transform: 'translateY(-50%)',
+          zIndex: 5
+        }}>
+          <Button 
+            type="primary"
+            size="large"
+            onClick={() => setShowWaypointPanel(!showWaypointPanel)}
+            style={{
+              boxShadow: '0 4px 12px rgba(0,0,0,0.15)'
+            }}
+          >
+            {showWaypointPanel ? '关闭编辑' : '航点编辑'}
+          </Button>
+        </div>
+      </div>
+      
+      {/* 底部航点编辑面板 */}
+      {showWaypointPanel && (
+        <div style={{
+          position: 'absolute',
+          bottom: 0,
+          left: 0,
+          right: 0,
+          height: '40vh',
+          backgroundColor: 'rgba(255, 255, 255, 0.95)',
+          backdropFilter: 'blur(8px)',
+          boxShadow: '0 -4px 16px rgba(0,0,0,0.15)',
+          zIndex: 25, // 提高层级，确保在 ButtonGroup (z-20) 之上
+          padding: '16px',
+          overflowY: 'auto'
+        }}>
+          <div className="mode-switch" style={{ marginBottom: '16px' }}>
             <Radio.Group
               value={mode}
               onChange={(e) => handleModeChange(e.target.value)}
@@ -1009,7 +1042,7 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
 
           {mode === "waypoint" && (
             <>
-              <div className="table-header">
+              <div className="table-header" style={{ marginBottom: '8px' }}>
                 <span>航点列表</span>
                 <div className="flex flex-row gap-2">
                   <Button
@@ -1037,7 +1070,7 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
                 rowKey="id"
                 size="small"
                 pagination={false}
-                // scroll={{ y: 300 }}
+                scroll={{ y: 200 }}
                 rowClassName={(_, index) => {
                   if (isEditing) return "";
                   const wpIdx = wp_idx as number | undefined;
@@ -1133,8 +1166,8 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
             </div>
           )}
         </div>
-      </div>
-    </Card>
+      )}
+    </div>
   );
 };
 

@@ -9,21 +9,35 @@
   padding: 0;
   box-sizing: border-box;
 }
-/* 根容器：PC端最大宽度1400px（适配主流2K/1080P屏）、水平居中、撑满视口高度 */
-#root {
-  max-width: 1400px;
+
+html {
   width: 100%;
-  margin: 0 auto;
-  min-height: 100vh;
-  padding: 16px;
+  height: 100%;
 }
+
 body {
   background: #f5f5f5;
-  display: flex;
-  justify-content: center;
-  min-height: 100vh;
-  /* 去掉原body的padding，移到#root，统一容器控制 */
+  margin: 0;
   padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* 根容器：全屏显示，无边距无内边距 */
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+/* 修复 Ant Design Spin 组件的高度问题 */
+.ant-spin-nested-loading,
+.ant-spin-container {
+  width: 100% !important;
+  height: 100% !important;
 }
 
 /* 美化横向滚动条（移动端状态组件用） */
