@@ -13,7 +13,7 @@ def scan_and_generate(scan_dir, output_file, json_include_path, namespace):
         r"//\s*@JSON_ENABLE\s*struct\s+(\w+)[^{]*\{([\s\S]*?)\};"
     )
     var_pattern = re.compile(
-        r"(?:[a-zA-Z_]\w*(?:::[a-zA-Z_]\w*)*(?:<[^>]+>)?)\s+([a-zA-Z_]\w*)\s*(?:=[^;]*)?;([^\n]*)"
+        r"(?:[a-zA-Z_]\w*(?:::[a-zA-Z_]\w*)*(?:<[^;={}]+>)?)\s+([a-zA-Z_]\w*)\s*(?:=[^;]*)?;([^\n]*)"
     )
     enum_pattern = re.compile(
         r"//\s*@JSON_ENABLE\s*enum\s+(?:class\s+)?(\w+)[^{]*\{([\s\S]*?)\};"
