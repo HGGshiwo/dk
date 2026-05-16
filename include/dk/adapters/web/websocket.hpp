@@ -2,6 +2,8 @@
 
 #include "./protocal.hpp"
 namespace dk {
+
+inline int MAX_RETRY_TIME = 10;
 // 内部类：接管 Socket 并处理 WebSocket 生命周期
 class WsSessionImpl : public WsConnection {
     websocket::stream<tcp::socket> ws_;
@@ -149,7 +151,7 @@ class WsSessionImpl : public WsConnection {
     // Core function to send and start timeout timer
     void do_send_and_wait(uint64_t msg_id, const json& payload, int retry_count) {
         // Max 3 retries, then give up (you can adjust this)
-        if (retry_count > 3) {
+        if (retry_count > MAX_RETRY_TIME) {
             std::lock_guard<std::mutex> lock(pending_mutex_);
             pending_msgs_.erase(msg_id);
             return;

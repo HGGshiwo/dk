@@ -157,7 +157,10 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
     size_t get_memory_mark() const override { return current_offset_; }
     void* allocate_bytes(size_t size, size_t alignment) override {
         size_t aligned_offset = (current_offset_ + alignment - 1) & ~(alignment - 1);
-        if (aligned_offset + size > MemorySize) return nullptr;
+        if (aligned_offset + size > MemorySize) {
+            std::cout << "[Engeine]: allocate " << aligned_offset + size << " > " << MemorySize << std::endl;
+            return nullptr;
+        };
         void* ptr = memory_arena_ + aligned_offset;
         current_offset_ = aligned_offset + size;
         return ptr;
@@ -341,11 +344,34 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
         return "UNKNOWN";
     }
 
-    template <typename StateType>
+    // 重载 1：处理只传“模板名”的情况 (如 is_active_state<WalkState>())
+    template <template <typename...> class TargetTmpl>
     bool is_active_state() {
         auto states = get_active_states_view();
         for (auto* s : states) {
-            if (dynamic_cast<StateType*>(s)) return true;
+            if (!s) continue;
+            if (dynamic_cast<TmplBase<TargetTmpl>*>(s) != nullptr) {
+                return true;
+            }
+        }
+        return false;
+    }
+    // 重载 2：处理传“具体类型”的情况 (如 InitState 或 WalkState<RobotContext>)
+    template <typename TargetType>
+    bool is_active_state() {
+        using CleanType = std::decay_t<TargetType>;
+
+        // 核心魔法：如果是 InitState，TargetCast 就是 InitState
+        // 如果是 WalkState<Context>，TargetCast 就是 TmplBase<WalkState>
+        using TargetCast = typename CastTargetType<CleanType>::type;
+
+        auto states = get_active_states_view();
+        for (auto* s : states) {
+            if (!s) continue;
+            // 完美匹配对应的 dynamic_cast！
+            if (dynamic_cast<TargetCast*>(s) != nullptr) {
+                return true;
+            }
         }
         return false;
     }

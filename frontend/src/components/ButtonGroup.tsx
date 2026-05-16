@@ -65,13 +65,13 @@ export const ButtonGroup = () => {
       let cols = 3; // 默认3列
       
       if (width >= 1920) {
-        cols = 8; // 超大屏：6列，每页18个按钮
+        cols = 16; // 超大屏：6列，每页18个按钮
       } else if (width >= 1440) {
-        cols = 8; // 大屏：5列，每页15个按钮
+        cols = 14; // 大屏：5列，每页15个按钮
       } else if (width >= 1024) {
-        cols = 4; // 中屏：4列，每页12个按钮
+        cols = 8; // 中屏：4列，每页12个按钮
       } else if (width >= 768) {
-        cols = 3; // 平板：3列，每页9个按钮
+        cols = 6; // 平板：3列，每页9个按钮
       } else {
         cols = 3; // 移动端：3列，每页9个按钮
       }

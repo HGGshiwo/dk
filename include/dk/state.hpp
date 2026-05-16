@@ -88,11 +88,11 @@ class StateAction {
     static StateAction step(Tuples&&... tuples) {
         StateAction action{Type::TRANSITION, nullptr};
         auto args_pack = std::make_tuple(std::forward<Tuples>(tuples)...);
-
-        action.path_builder = [args_pack](IStatePathBuilder<Context>& builder) {
+        using BuilderT = dk::IStatePathBuilder<Context>;
+        action.path_builder = std::function<void(BuilderT&)>([args_pack](BuilderT& builder) {
             std::apply([&builder](auto&&... unpacked_tuples) { TargetState::build_path(builder, unpacked_tuples...); },
                        args_pack);
-        };
+        });
         return action;
     }
 };
@@ -188,6 +188,37 @@ class IEventHandler : public BaseInterface {
     }
 };
 
+// 1. Tag 基类 (和之前一样)
+template <template <typename...> class Tmpl>
+class TmplBase {
+   public:
+    virtual ~TmplBase() = default;
+};
+// 2. BaseState 混入的空基类 (防止普通类继承报错)
+struct EmptyMixin {};
+// 3. 供 BaseState 继承时使用的萃取器 (和之前基本一样)
+template <typename T>
+struct AutoExtractTmpl {
+    using type = EmptyMixin;
+};  // 普通类继承一个空壳即可
+template <template <typename...> class Tmpl, typename... Args>
+struct AutoExtractTmpl<Tmpl<Args...>> {
+    using type = TmplBase<Tmpl>;
+};
+// ==========================================
+// 【新增】4. 动态转换目标选择器 (Cast Target Router)
+// ==========================================
+// 默认情况：如果是普通类（如 InitState），转换目标就是它自己！
+template <typename T>
+struct CastTargetType {
+    using type = T;
+};
+// 偏特化情况：如果是模板实例（如 WalkState<Context>），转换目标是 TmplBase<WalkState>
+template <template <typename...> class Tmpl, typename... Args>
+struct CastTargetType<Tmpl<Args...>> {
+    using type = TmplBase<Tmpl>;
+};
+
 /*
 # 使用方法
 ```
@@ -218,9 +249,11 @@ public:
     }
 };
 ```
+// 自动提取模板并继承！
 */
 template <typename Context, typename Derived, typename Parent>
-class BaseState : public IEventHandler<IState<Context>, Context, StateAction<Context>, Derived> {
+class BaseState : public IEventHandler<IState<Context>, Context, StateAction<Context>, Derived>,
+                  public AutoExtractTmpl<Derived>::type {
    public:
     using ParentState = Parent;
 

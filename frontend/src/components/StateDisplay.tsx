@@ -9,6 +9,7 @@ export interface StateItemConfig {
   collapse?: boolean; // 是否默认折叠（不展开时显示）
   true_value?: string; // state_bool 类型：true 时显示的文字
   false_value?: string; // state_bool 类型：false 时显示的文字
+  fixed?: number; // 数值固定小数位数，不够位数补0
 }
 
 interface DisplayItemProps {
@@ -18,6 +19,17 @@ interface DisplayItemProps {
 
 const DisplayItem = ({ cfg, displayType }: DisplayItemProps) => {
   const value = useAppStore((state) => state.stateData[cfg.key]);
+
+  // 格式化值：如果配置了fixed，将值固定到指定小数位数
+  const formatValue = (val: any): string => {
+    if (cfg.fixed !== undefined && cfg.fixed >= 0) {
+      const numValue = Number(val);
+      if (!isNaN(numValue)) {
+        return numValue.toFixed(cfg.fixed);
+      }
+    }
+    return String(val);
+  };
 
   // 根据不同类型渲染不同内容
   const renderContent = () => {
@@ -59,7 +71,7 @@ const DisplayItem = ({ cfg, displayType }: DisplayItemProps) => {
         // 只显示值
         return (
           <span className="text-sm font-semibold text-white">
-            {String(value)}
+            {formatValue(value)}
           </span>
         );
       }
@@ -71,7 +83,7 @@ const DisplayItem = ({ cfg, displayType }: DisplayItemProps) => {
           <>
             <span className="text-xs text-white/80">{cfg.name}:</span>
             <span className="text-sm font-semibold text-white">
-              {String(value)}
+              {formatValue(value)}
             </span>
           </>
         );
