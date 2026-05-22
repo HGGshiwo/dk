@@ -36,6 +36,10 @@ template <typename ClassType, typename ReturnType, typename ArgType>
 struct lambda_traits<ReturnType (ClassType::*)(ArgType) const> {
     using arg_type = std::decay_t<ArgType>;  // 提取出具体的事件类型
 };
+template <typename ClassType, typename ReturnType, typename ArgType>
+struct lambda_traits<ReturnType (ClassType::*)(ArgType)> {
+    using arg_type = std::decay_t<ArgType>;  // 提取出具体的事件类型
+};
 
 template <class... Ts>
 struct overloaded : Ts... {

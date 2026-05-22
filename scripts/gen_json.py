@@ -137,6 +137,23 @@ inline void from_json(const nlohmann::json& j, {struct_name}& t) {{
 #ifndef AUTO_JSON_OPTIONAL_SERIALIZER_INJECTED
 #define AUTO_JSON_OPTIONAL_SERIALIZER_INJECTED
 namespace nlohmann {
+    template <>
+    struct adl_serializer<Eigen::Vector3d> {
+        // Eigen::Vector3d 转 JSON
+        static void to_json(json& j, const Eigen::Vector3d& v) {
+            j = json::array({v.x(), v.y(), v.z()});  // 明确指定为 JSON 数组
+        }
+        // JSON 转 Eigen::Vector3d
+        static void from_json(const json& j, Eigen::Vector3d& v) {
+            if (!j.is_array() || j.size() != 3) {
+                throw std::invalid_argument("JSON must be an array of 3 numbers to convert to Vector3d");
+            }
+            v.x() = j.at(0).get<double>();
+            v.y() = j.at(1).get<double>();
+            v.z() = j.at(2).get<double>();
+        }
+    };
+
     template <typename T>
     struct adl_serializer<std::optional<T>> {
         static void to_json(json& j, const std::optional<T>& opt) {

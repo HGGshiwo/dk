@@ -63,7 +63,7 @@ class UdpAdapter : public BaseAdapter<Context, DerivedEngine> {
     }
 
    public:
-    UdpAdapter(std::shared_ptr<DerivedEngine> engine, unsigned short port,
+    UdpAdapter(std::shared_ptr<DerivedEngine> engine, unsigned short int port,
                std::function<RouteId(const std::vector<uint8_t>&)> router)
         : BaseAdapter<Context, DerivedEngine>(engine),
           ioc_(engine->get_ioc()),
@@ -100,7 +100,9 @@ class UdpAdapter : public BaseAdapter<Context, DerivedEngine> {
 
     template <typename F>
     void bind_context(const RouteId& id, F&& cb) {
-        context_routes_[id] = [cb = std::forward<F>(cb)](const std::vector<uint8_t>& data, auto ctx) { cb(data, ctx); };
+        context_routes_[id] = [cb = std::forward<F>(cb)](const std::vector<uint8_t>& data, auto& ctx) {
+            cb(data, ctx);
+        };
     }
 
     template <typename Callable>

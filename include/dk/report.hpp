@@ -1,7 +1,8 @@
 #pragma once
-
+#include <Eigen/Dense>
 #include <atomic>
 #include <chrono>
+#include <dk_auto_json.hpp>
 #include <functional>
 #include <nlohmann/json.hpp>
 #include <shared_mutex>
@@ -50,10 +51,10 @@ class IReportable {
    public:
     virtual ~IReportable() = default;
     // 尝试增量上报（脏位+限频）
-    virtual void try_report(nlohmann::json& j) = 0;
+    virtual void try_report(::nlohmann::json& j) = 0;
 
     // 无视状态，强制写入当前完整数据
-    virtual void append_full_state(nlohmann::json& j) const = 0;
+    virtual void append_full_state(::nlohmann::json& j) const = 0;
 
     // 强制标记为脏
     virtual void mark_dirty() = 0;
@@ -68,15 +69,15 @@ class StateRegistry {
     void register_var(IReportable* var) { reportables_.push_back(var); }
 
     // 遍历所有注册的变量，尝试触发上报
-    void report_all(nlohmann::json& j) {
+    void report_all(::nlohmann::json& j) {
         for (auto* var : reportables_) {
             var->try_report(j);
         }
     }
 
     // 获取当前所有数据的全量快照
-    nlohmann::json get_full_state() const {
-        nlohmann::json j;
+    ::nlohmann::json get_full_state() const {
+        ::nlohmann::json j;
         for (auto* var : reportables_) {
             var->append_full_state(j);
         }
@@ -149,7 +150,7 @@ class TrackedVar : public IReportable {
     RateLimiter rate_;
 
     std::string key_;
-    std::function<void(nlohmann::json&, const T&)> custom_serializer_;
+    std::function<void(::nlohmann::json&, const T&)> custom_serializer_;
 
    public:
     // 构造1：标准 JSON 键值对上报
@@ -159,13 +160,13 @@ class TrackedVar : public IReportable {
     }
 
     // 构造2：自定义序列化（适用于 Vector3d 拆分成 lat, lon 等情况）
-    TrackedVar(StateRegistry& reg, double hz, T init_val, std::function<void(nlohmann::json&, const T&)> serializer)
+    TrackedVar(StateRegistry& reg, double hz, T init_val, std::function<void(::nlohmann::json&, const T&)> serializer)
         : data_(std::move(init_val)), rate_(hz), custom_serializer_(std::move(serializer)) {
         reg.register_var(this);
     }
 
     // 无视脏位强制写入
-    void append_full_state(nlohmann::json& j) const override {
+    void append_full_state(::nlohmann::json& j) const override {
         std::shared_lock<std::shared_mutex> lock(mtx_);
         if (custom_serializer_) {
             custom_serializer_(j, data_);
@@ -218,7 +219,7 @@ class TrackedVar : public IReportable {
     }
 
     // 实现 IReportable 接口：由 Registry 统一调用
-    void try_report(nlohmann::json& j) override {
+    void try_report(::nlohmann::json& j) override {
         if (!dirty_.load(std::memory_order_acquire)) return;
         if (!rate_.check_and_update()) return;
 

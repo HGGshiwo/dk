@@ -20,13 +20,13 @@
 // 1. 定义数据结构 (使用框架要求的宏标记)
 // ============================================================================
 
-// @JSON_ENABLE
+// @JSON _ENABLE
 struct TestLoginResult {
     bool success;
     std::string token;
 };
 
-// @JSON_ENABLE
+// @JSON _ENABLE
 struct AsyncLoginEvent : public dk::AsyncEvent<TestLoginResult> {
     std::string username;
     std::string password;

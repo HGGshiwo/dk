@@ -219,7 +219,7 @@ export const ButtonGroup = () => {
         activeKey={activeTab}
         onChange={setActiveTab}
         items={tabItems}
-        size="small"
+        size="middle"
         tabBarStyle={{ marginBottom: "8px" }}
       />
     </Card>
