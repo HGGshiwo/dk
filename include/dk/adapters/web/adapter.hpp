@@ -254,6 +254,10 @@ class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
         register_ws_route(path, std::move(managed_endpoint));
     }
 
+    void register_static_dir(const std::string& url_prefix, const boost::filesystem::path& local_dir) {
+        register_static_dir(url_prefix, local_dir.string());
+    }
+
     // --- 4. 注册静态目录路由 ---
     // url_prefix: 比如 "/static"
     // local_dir: 可以传绝对路径，或者基于运行目录的相对路径 "./public"
@@ -270,6 +274,12 @@ class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
     }
 
     // 读取并返回一个json
+    void register_file_route(boost::beast::http::verb method, const std::string& path,
+                             const boost::filesystem::path& local_file_path,
+                             const std::string& content_type = "application/json") {
+        register_file_route(method, path, local_file_path.string(), content_type);
+    }
+
     void register_file_route(boost::beast::http::verb method, const std::string& path,
                              const std::string& local_file_path, const std::string& content_type = "application/json") {
         class SingleFileHandler : public IProtocolHandler<WebAdapter> {

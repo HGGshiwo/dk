@@ -32,7 +32,7 @@ def scan_and_generate(scan_dir, output_file, json_include_path, namespace):
         except:
             continue
 
-        if "// @JSON_ENABLE" not in content:
+        if "@JSON_ENABLE" not in content:
             continue
 
         if file_path.suffix.lower() in source_extensions:
@@ -53,13 +53,20 @@ def scan_and_generate(scan_dir, output_file, json_include_path, namespace):
             to_json_lines = []
             from_json_lines = []
 
+            # 🌟 改造点：开始 try 块，并初始化字段追踪指针
+            from_json_lines.append('    const char* _current_key = "unknown";')
+            from_json_lines.append("    try {")
+
             for base_match in base_pattern.finditer(struct_body):
                 base_name = base_match.group(1)
                 to_json_lines.append(
                     f"    to_json(j, static_cast<const {base_name}&>(t));"
                 )
                 from_json_lines.append(
-                    f"    from_json(j, static_cast<{base_name}&>(t));"
+                    f'        _current_key = "[BaseClass: {base_name}]";'
+                )
+                from_json_lines.append(
+                    f"        from_json(j, static_cast<{base_name}&>(t));"
                 )
 
             for var_match in var_pattern.finditer(struct_body):
@@ -70,9 +77,19 @@ def scan_and_generate(scan_dir, output_file, json_include_path, namespace):
                 json_key = alias_match.group(1) if alias_match else var_name
 
                 to_json_lines.append(f'    j["{json_key}"] = t.{var_name};')
+
+                # 🌟 改造点：解析前更新 _current_key
+                from_json_lines.append(f'        _current_key = "{json_key}";')
                 from_json_lines.append(
-                    f'    if (j.contains("{json_key}") && !j.at("{json_key}").is_null()) j.at("{json_key}").get_to(t.{var_name});'
+                    f'        if (j.contains("{json_key}") && !j.at("{json_key}").is_null()) j.at("{json_key}").get_to(t.{var_name});'
                 )
+
+            # 🌟 改造点：闭合 try 块并 catch 异常，抛出带有具体字段名的新异常
+            from_json_lines.append("    } catch (const nlohmann::json::exception& e) {")
+            from_json_lines.append(
+                f'        throw std::runtime_error(std::string("Config Load Error: Struct [{struct_name}], Field [") + _current_key + "] - " + e.what());'
+            )
+            from_json_lines.append("    }")
 
             code = f"""
 // Auto-generated for Struct: {struct_name}
@@ -121,7 +138,9 @@ inline void from_json(const nlohmann::json& j, {struct_name}& t) {{
         f.write("// 本文件由框架自动生成\n")
         f.write("#pragma once\n")
         f.write(f"#include {json_include_path}\n")
-        f.write("#include <optional>\n\n")
+        f.write("#include <optional>\n")
+        f.write("#include <stdexcept>\n")  # 新增：用于抛出异常
+        f.write("#include <string>\n\n")  # 新增：用于字符串拼接
 
         for inc in sorted(included_files):
             f.write(f'#include "{inc}"\n')
@@ -137,6 +156,34 @@ inline void from_json(const nlohmann::json& j, {struct_name}& t) {{
 #ifndef AUTO_JSON_OPTIONAL_SERIALIZER_INJECTED
 #define AUTO_JSON_OPTIONAL_SERIALIZER_INJECTED
 namespace nlohmann {
+    template <>
+    struct adl_serializer<Eigen::Matrix3d> {
+        // 序列化：Matrix3d -> json (转换为长度为 9 的数组，按行优先)
+        static void to_json(nlohmann::json& j, const Eigen::Matrix3d& m) {
+            j = nlohmann::json::array();
+            for (int row = 0; row < 3; ++row) {
+                for (int col = 0; col < 3; ++col) {
+                    j.push_back(m(row, col));
+                }
+            }
+        }
+
+        // 反序列化：json -> Matrix3d
+        static void from_json(const nlohmann::json& j, Eigen::Matrix3d& m) {
+            // 数据校验
+            if (!j.is_array() || j.size() != 9) {
+                throw std::invalid_argument("JSON format error: Matrix3d requires an array of size 9.");
+            }
+
+            int index = 0;
+            for (int row = 0; row < 3; ++row) {
+                for (int col = 0; col < 3; ++col) {
+                    m(row, col) = j.at(index++).get<double>();
+                }
+            }
+        }
+    };
+    
     template <>
     struct adl_serializer<Eigen::Vector3d> {
         // Eigen::Vector3d 转 JSON
