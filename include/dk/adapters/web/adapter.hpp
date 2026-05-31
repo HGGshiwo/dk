@@ -180,7 +180,7 @@ class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
                         });
                 } catch (const std::exception& ex) {
                     session->send_http_response(http::status::bad_request, "{\"error\":\"Bad Request\"}");
-                    log_result(ex.what());
+                    log_result(std::string(ex.what()));
                 }
             }
         };

@@ -1,6 +1,4 @@
 #pragma once
-#include <yaml-cpp/yaml.h>
-
 #include <boost/smart_ptr/shared_ptr.hpp>
 #include <fstream>
 #include <iostream>
