@@ -117,6 +117,8 @@ class IState {
 template <typename BaseInterface, typename Context, typename ReturnType, typename Derived>
 class IEventHandler : public BaseInterface {
    public:
+    using BaseInterface::BaseInterface;
+
     ReturnType handle_event(const std::any& event, Context& ctx) override {
         // 延迟推导类型，避开 CRTP 不完整类型问题
         static_assert(has_allowed_events<Derived>::value,

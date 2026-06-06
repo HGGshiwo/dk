@@ -25,6 +25,7 @@
 #include "./event_listener.hpp"
 #include "./future.hpp"
 #include "./state.hpp"
+#include "ITimeProvider.hpp"
 
 // ================= dk 框架核心 =================
 namespace dk {
@@ -105,6 +106,12 @@ struct WaitNode {
     std::shared_ptr<Promise<bool>> promise;
 };
 
+struct StepLevelGuard {
+    int& level;
+    StepLevelGuard(int& l) : level(l) { level++; }
+    ~StepLevelGuard() { level--; }
+};
+
 // Engine的抽象接口，不需要Engine的真实类型
 template <typename Context, size_t MaxDepth = 10, size_t MemorySize = 65536>
 class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
@@ -123,9 +130,8 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
     std::atomic<bool> running_{false};
 
     std::optional<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>> work_guard_;
-    std::optional<boost::asio::steady_timer> tick_timer_;
+    std::function<void()> tick_canceler_;
     std::chrono::milliseconds tick_interval_;
-    std::thread worker_thread_;  // 只需要这一个线程跑 io_context
 
     std::optional<std::unique_ptr<boost::asio::thread_pool>> workflow_pool_;
     std::thread::id event_thread_id_;  // 事件循环的thread id, 用于检测wait
@@ -141,21 +147,22 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
     std::vector<EventListenerPtr> listeners_;  // 和状态无关的监听器
 
     // 引入 Asio 的绝对核心：I/O 上下文
-    boost::asio::io_context io_context_;
+    boost::asio::io_context& io_context_;
+    std::shared_ptr<ITimeProvider> time_provider_;
+
     // 保存所有正在等待的请求。使用 map 是为了 O(1) 的删除效率
     std::unordered_map<uint64_t, std::shared_ptr<WaitNode>> active_waits_;
     uint64_t next_wait_id_ = 0;
 
     int step_call_level_ = 0;  // step调用层数
-    struct StepLevelGuard {
-        int& level;
-        StepLevelGuard(int& l) : level(l) { level++; }
-        ~StepLevelGuard() { level--; }
-    };
 
     virtual void process_internal(const std::any& e) = 0;
 
     virtual Future<bool> wait_internal(std::function<bool(const std::any&)> predicate, CancellationToken token) = 0;
+
+   public:
+    IEngine(boost::asio::io_context& io, std::shared_ptr<ITimeProvider> time_provider)
+        : io_context_(io), time_provider_(std::move(time_provider)) {}
 
     // IStatePathBuilder 接口实现（含生命周期事件派发）
     size_t get_memory_mark() const override { return current_offset_; }
@@ -278,11 +285,10 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
 
     void schedule_next_tick() {
         if (!running_) return;
-        tick_timer_.value().expires_after(tick_interval_);
-        tick_timer_.value().async_wait([this](const boost::system::error_code& ec) {
-            if (!ec && running_) {
+        double interval_sec = std::chrono::duration<double>(tick_interval_).count();
+        tick_canceler_ = time_provider_->start_ticker(interval_sec, [this]() {
+            if (running_) {
                 this->process_internal(std::make_any<TickEvent>(TickEvent{}));
-                this->schedule_next_tick();
             }
         });
     }
@@ -299,6 +305,7 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
     virtual void handle_event(const std::any& event, Context& ctx) = 0;
 
     boost::asio::io_context& get_ioc() { return io_context_; }
+    std::shared_ptr<ITimeProvider> get_time_provider() const { return time_provider_; }
 
     std::thread::id get_thread_id() override { return event_thread_id_; }
 
@@ -307,14 +314,7 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
 
     // 实现promise runtime
     std::function<void()> set_future_timeout(uint32_t ms, std::function<void()> on_timeout) override {
-        auto timer = std::make_shared<boost::asio::steady_timer>(io_context_);
-        timer->expires_after(std::chrono::milliseconds(ms));
-
-        timer->async_wait([on_timeout](const boost::system::error_code& ec) {
-            if (!ec) on_timeout();
-        });
-        // 返回取消句柄
-        return [timer]() { timer->cancel(); };
+        return time_provider_->set_timeout(ms / 1000.0, std::move(on_timeout));
     }
 
     // 线程安全的外部事件注入接口
@@ -426,43 +426,22 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
         if (!running_.compare_exchange_strong(expected, true)) return;
         tick_interval_ = tick_interval;
 
-        // Use shared_ptr to prevent dangling reference if exception occurs later
-        auto init_promise = std::make_shared<std::promise<void>>();
-        std::future<void> init_future = init_promise->get_future();
-        // Pass arguments into std::thread, lambda accepts them as thread_args
-        worker_thread_ = std::thread(
-            [this, init_promise](auto&&... thread_args) {
-                bool promise_fulfilled = false;  // Track promise state to avoid std::future_error
-                try {
-                    event_thread_id_ = std::this_thread::get_id();
-                    work_guard_.emplace(boost::asio::make_work_guard(io_context_));
-                    tick_timer_.emplace(io_context_);
-                    workflow_pool_.emplace(std::make_unique<boost::asio::thread_pool>(4));
-                    schedule_next_tick();
-                    // Forward the thread_args to the initial transition
+        // 不再起新线程，仅初始化数据和派发第一个事件
+        work_guard_.emplace(boost::asio::make_work_guard(io_context_));
+        workflow_pool_.emplace(std::make_unique<boost::asio::thread_pool>(4));
+        schedule_next_tick();
+
+        // 派发初始状态跳转（放入 io_context 队列）
+        boost::asio::post(io_context_, [this, args = std::make_tuple(std::forward<Args>(args)...)]() mutable {
+            // 真正开始处理事件时，记录执行该任务的线程ID作为 event_thread_id_
+            event_thread_id_ = std::this_thread::get_id();
+            std::apply(
+                [this](auto&&... unpacked_args) {
                     execute_transition(StateAction<Context>::template step<RootState>(
-                        std::forward<decltype(thread_args)>(thread_args)...));
-
-                    init_promise->set_value();
-                    promise_fulfilled = true;
-
-                    io_context_.run();
-                } catch (const std::exception& e) {
-                    running_ = false;
-                    std::cout << "[Engine]: fatal error: " << e.what() << std::endl;
-                    if (!promise_fulfilled) {
-                        init_promise->set_exception(std::current_exception());
-                    }
-                } catch (...) {
-                    running_ = false;
-                    std::cout << "[Engine]: Unknown exception type without what() interface.\n";
-                    if (!promise_fulfilled) {
-                        init_promise->set_exception(std::current_exception());
-                    }
-                }
-            },
-            std::forward<Args>(args)...);  // Standard way to pass args to std::thread
-        init_future.get();
+                        std::forward<decltype(unpacked_args)>(unpacked_args)...));
+                },
+                std::move(args));
+        });
     }
 
     void stop() {
@@ -471,18 +450,12 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
         if (!running_.compare_exchange_strong(expected, false)) {
             return;
         }
+        if (tick_canceler_) {
+            tick_canceler_();
+            tick_canceler_ = nullptr;
+        }
         if (work_guard_.has_value()) {
             work_guard_.reset();  // 允许 io_context 退出
-        }
-
-        io_context_.stop();  // 立刻停止事件循环
-        if (worker_thread_.joinable()) {
-            // 判断是否是当前线程
-            if (std::this_thread::get_id() != worker_thread_.get_id()) {
-                worker_thread_.join();
-            } else {
-                throw std::logic_error("FATAL: Cannot destroy runtime from its own worker thread!");
-            }
         }
         if (workflow_pool_.has_value()) {
             workflow_pool_.value()->stop();
@@ -514,57 +487,66 @@ class BaseEngine : public IEventHandler<IEngine<Context>, Context, void, Derived
    private:
     // 使用子类类型作为模板参数，因为用到handle_event
     void process_internal(const std::any& e) {
-        // 1. 触发 Wait 系统 (纯异步无状态修改，无需拦截)
-        std::vector<std::shared_ptr<Promise<bool>>> to_resolve;
-        for (auto it = this->active_waits_.begin(); it != this->active_waits_.end();) {
-            if (it->second->promise->state() != PromiseState::PENDING) {
-                it = this->active_waits_.erase(it);
-            } else if (it->second->predicate(e)) {
-                to_resolve.push_back(it->second->promise);  // 先收集
-                it = this->active_waits_.erase(it);         // 安全删除
-            } else {
-                ++it;
-            }
-        }
-        // 循环外再执行回调，此时无论外部怎么修改 active_waits_ 都是安全的
-        for (auto& p : to_resolve) {
-            p->resolve(true);
-        }
-        // =======================================================
-        // === 开启事件处理周期的统一防护：所有显式跳转转为缓存 ===
-        // =======================================================
+        // 开启事件处理周期的统一防护
         StateAction<Context> final_transition = StateAction<Context>::unhandled();
-        // 2. 触发全局无状态监听器
-        for (auto& listener : this->listeners_) {
-            listener->handle_event(e, this->ctx_);
-        }
-        // 3. 触发引擎自身的拦截 (BaseEngine 继承自 IEventHandler)
-        if (!this->pending_transition_.has_value()) {
-            this->handle_event(e, this->ctx_);
-        }
-        // 4. HSM 事件冒泡核心：从数组尾部（叶子）向头部（根）冒泡
-        if (!this->pending_transition_.has_value()) {
-            for (int i = this->active_depth_ - 1; i >= 0; --i) {
-                StateAction<Context> action = this->active_path_[i].state->handle_event(e, this->ctx_);
-                if (action.type == StateAction<Context>::Type::TRANSITION) {
-                    final_transition = action;
-                    this->pending_transition_.reset();
-                    break;
-                } else if (this->pending_transition_.has_value()) {
-                    final_transition = std::move(*(this->pending_transition_));
-                    this->pending_transition_.reset();
-                    break;
-                } else if (action.type == StateAction<Context>::Type::HANDLED) {
-                    break;
+        {
+            StepLevelGuard event_guard(this->step_call_level_);
+            // 1. 触发 Wait 系统
+            std::vector<std::shared_ptr<Promise<bool>>> to_resolve;
+            for (auto it = this->active_waits_.begin(); it != this->active_waits_.end();) {
+                if (it->second->promise->state() != PromiseState::PENDING) {
+                    it = this->active_waits_.erase(it);
+                } else if (it->second->predicate(e)) {
+                    to_resolve.push_back(it->second->promise);
+                    it = this->active_waits_.erase(it);
+                } else {
+                    ++it;
                 }
             }
-        } else {
-            final_transition = std::move(*(this->pending_transition_));
-            this->pending_transition_.reset();
-        }
-        // =======================================================
-        // === 防护解除，统一结算状态树 ===
-        // =======================================================
+            for (auto& p : to_resolve) {
+                p->resolve(true);  // 如果这里触发了 step()，会被缓存在 pending_transition_ 中
+            }
+
+            // 2. 触发全局无状态监听器
+            for (auto& listener : this->listeners_) {
+                if (this->pending_transition_.has_value()) break;  // 【短路优化】一旦发生跳转，立刻中止后续派发
+                listener->handle_event(e, this->ctx_);
+            }
+
+            // 3. 触发引擎自身的拦截
+            if (!this->pending_transition_.has_value()) {
+                this->handle_event(e, this->ctx_);
+            }
+
+            // 4. HSM 事件冒泡核心
+            if (!this->pending_transition_.has_value()) {
+                for (int i = this->active_depth_ - 1; i >= 0; --i) {
+                    StateAction<Context> action = this->active_path_[i].state->handle_event(e, this->ctx_);
+
+                    // 优先处理 return StateAction::step() 的正规跳转
+                    if (action.type == StateAction<Context>::Type::TRANSITION) {
+                        final_transition = action;
+                        break;
+                    }
+                    // 拦截到了内部强行调用 engine->step() 产生的缓存跳转
+                    else if (this->pending_transition_.has_value()) {
+                        break;
+                    }
+                    // 事件被拦截吸收
+                    else if (action.type == StateAction<Context>::Type::HANDLED) {
+                        break;
+                    }
+                }
+            }
+
+            // 【终极收口】：如果在 Wait、Listener、Base 或 HSM 内部任何一处
+            // 调用了 step()，统统在这里一次性提取！
+            if (this->pending_transition_.has_value()) {
+                final_transition = std::move(*(this->pending_transition_));
+                this->pending_transition_.reset();
+            }
+
+        }  // 【护盾解除】：离开作用域，step_call_level_ 恢复为 0
 
         // 如果最终决议需要发生跳转，在这里绝对安全地执行！
         if (final_transition.type == StateAction<Context>::Type::TRANSITION) {
@@ -574,6 +556,8 @@ class BaseEngine : public IEventHandler<IEngine<Context>, Context, void, Derived
 
    public:
     using AllowedEvents = std::tuple<>;
+    using BaseHandler = IEventHandler<IEngine<Context>, Context, void, DerivedEngine>;
+    using BaseHandler::BaseHandler;
 
     // 使用子类类型作为模板参数，因为使用了shared_from_this
     // 2. 异步派发：【在塞入队列前，给 Event 注入 Promise！】
