@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useMemo, useCallback } from "react";
-import { Table as AntTable } from "antd";
+import { Table as AntTable, Switch } from "antd";
 import type { TableProps as AntTableProps } from "antd/es/table";
 
 export interface TableColumnConfig {
@@ -13,11 +13,14 @@ export interface TableColumnConfig {
 /** Table组件行数据 */
 export interface TableRowData {
   key: string; // 唯一标识
-  [key: string]: string | number | string[]; // 动态字段
+  [key: string]: string | number | boolean | string[]; // 动态字段
 }
 
 // 受控组件的value类型：行ID -> 列名 -> (类型, 最新值)
-export type TableEditValue = Record<string, Record<string, string | number>>;
+export type TableEditValue = Record<
+  string,
+  Record<string, string | number | boolean>
+>;
 
 interface TableProps {
   columns: TableColumnConfig[];
@@ -54,7 +57,7 @@ const EditableCell: React.FC<{
     if (inputValue !== text) {
       const value =
         dataType == "number" ? parseFloat(`${inputValue}`) : inputValue;
-      onSave(record.key, columnKey, value);
+      onSave(record.key, columnKey, value as string | number);
     }
     setEditing(false);
   }, [inputValue, text, dataType, onSave, record.key, columnKey]);
@@ -118,7 +121,7 @@ const Table: React.FC<TableProps> = ({
 
   // 2. 处理单元格保存：生成新的value并调用外部onChange（纯函数，无副作用）
   const handleCellSave = useCallback(
-    (rowId: string, colKey: string, newValue: string | number) => {
+    (rowId: string, colKey: string, newValue: string | number | boolean) => {
       if (!onChange) return; // 无回调则不处理
 
       // 不可变更新：基于当前外部value生成新值（保证受控）
@@ -139,15 +142,24 @@ const Table: React.FC<TableProps> = ({
   // 3. 渲染单元格：转发保存事件到handleCellSave
   const renderCell = useCallback(
     (
-      text: string | number,
+      text: string | number | boolean,
       record: TableRowData,
       col: TableColumnConfig,
       editWidth: number,
     ) => {
+      if (typeof text === "boolean") {
+        return (
+          <Switch
+            checked={text}
+            disabled={!col.editable}
+            onChange={(checked) => handleCellSave(record.key, col.key, checked)}
+          />
+        );
+      }
       if (col.editable) {
         return (
           <EditableCell
-            text={text}
+            text={text as string | number}
             record={record}
             columnKey={col.key}
             onSave={handleCellSave}
@@ -171,7 +183,7 @@ const Table: React.FC<TableProps> = ({
           dataIndex: col.key,
           key: col.key,
           width: col.editable ? editWidth : col.width,
-          render: (text: string | number, record: TableRowData) =>
+          render: (text: string | number | boolean, record: TableRowData) =>
             renderCell(text, record, col, editWidth),
         };
       }),

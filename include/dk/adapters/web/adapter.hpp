@@ -7,7 +7,6 @@
 #include "./protocal.hpp"
 #include "./websocket.hpp"
 #include "dk/adapters/base.hpp"
-#include "dk/logger.hpp"
 #include "spdlog/spdlog.h"
 
 namespace fs = boost::filesystem;

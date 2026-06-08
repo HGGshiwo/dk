@@ -7,7 +7,7 @@ import { Input } from "antd";
 interface GroupTableData {
   key: string; // 唯一标识
   group: string[]; // 分组依据
-  [key: string]: string | number | string[]; // 动态字段
+  [key: string]: string | number | boolean | string[]; // 动态字段
 }
 interface GroupTableConfig {
   columnConfig: TableColumnConfig[];
