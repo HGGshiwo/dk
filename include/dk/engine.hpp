@@ -584,7 +584,7 @@ class BaseEngine : public IEventHandler<IEngine<Context>, Context, void, Derived
     Future<bool> wait_internal(std::function<bool(const std::any&)> predicate, CancellationToken token) override {
         auto promise = std::make_shared<Promise<bool>>(this->shared_from_this(), token);
         Future<bool> future = promise->get_future();
-        boost::asio::post(this->io_context_, [this, predicate = std::move(predicate), promise]() {
+        boost::asio::post(this->io_context_, [this, predicate = std::move(predicate), promise]() mutable {
             uint64_t id = ++(this->next_wait_id_);
             this->active_waits_[id] = std::make_shared<WaitNode>(WaitNode{id, std::move(predicate), promise});
         });

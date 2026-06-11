@@ -469,6 +469,14 @@ class Promise {
     std::shared_ptr<SharedState<T>> state_;
 
    public:
+    // 1. 禁用拷贝语义（彻底阻断隐式拷贝引发的血案）
+    Promise(const Promise&) = delete;
+    Promise& operator=(const Promise&) = delete;
+
+    // 2. 启用移动语义（转移所有权）
+    Promise(Promise&&) = default;
+    Promise& operator=(Promise&&) = default;
+
     // 构造注入 Dispatcher
     Promise(Dispatcher disp, TimeoutScheduler timeout_disp = nullptr,
             std::optional<CancellationToken> token = std::nullopt)
