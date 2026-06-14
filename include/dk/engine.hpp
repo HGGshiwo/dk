@@ -127,6 +127,10 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
     size_t build_depth_ = 0;
     bool divergence_found_ = false;
 
+    // 当次跳转的重入控制
+    bool current_force_full_reentry_ = false;
+    std::function<bool(IState<Context>*)> current_reentry_predicate_;
+
     std::atomic<bool> running_{false};
 
     std::optional<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>> work_guard_;
@@ -178,11 +182,22 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
     }
 
     bool try_reuse(std::string_view state_name) override {
-        if (!divergence_found_ && build_depth_ < active_depth_ &&
+        bool hit_reentry_breakpoint = current_force_full_reentry_;
+
+        // +++ 新增：如果当前栈深度有节点，且命中目标类型，打断复用 +++
+        if (!hit_reentry_breakpoint && current_reentry_predicate_ && build_depth_ < active_depth_) {
+            if (current_reentry_predicate_(active_path_[build_depth_].state)) {
+                hit_reentry_breakpoint = true;
+            }
+        }
+
+        // 只有没碰到断点，且名字匹配，才允许复用
+        if (!hit_reentry_breakpoint && !divergence_found_ && build_depth_ < active_depth_ &&
             active_path_[build_depth_].state->name_view() == state_name) {
             build_depth_++;
             return true;
         }
+
         if (!divergence_found_) {
             divergence_found_ = true;
             // 【分歧点发现】：立刻向上逐级退出旧节点
@@ -233,6 +248,11 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
                 // 初始化构建环境
                 build_depth_ = 0;
                 divergence_found_ = false;
+
+                // +++ 装载当次跳转的重入配置 +++
+                current_force_full_reentry_ = action.force_full_reentry;
+                current_reentry_predicate_ = std::move(action.reentry_predicate);
+
                 // 【魔法时刻】：一行代码自动完成 LCA 比对、旧状态 Pop 退栈、新状态 Push 入栈
                 action.path_builder(*this);
                 // 如果新路径比旧路径短，把多余的尾巴截断退出
@@ -249,7 +269,7 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
                 }
             }
         } catch (const std::exception& e) {
-            step_call_level_ = 0;
+            // step_call_level_ = 0;
             std::cout << "[Engine]: transition error: " << e.what() << std::endl;
         }
     }
@@ -329,6 +349,22 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
         // 利用 StateAction 的静态工厂完成“类型擦除”
         StateAction<Context> action = StateAction<Context>::template step<StateType>(std::forward<Args>(args)...);
         // 调用子类实现的非模板虚函数
+        this->step_internal(action);
+    }
+
+    // 强制从指定节点重入
+    template <typename TargetState, typename ReentryFromState, typename... Args>
+    void step_reenter_from(Args&&... args) {
+        StateAction<Context> action = StateAction<Context>::template step<TargetState>(std::forward<Args>(args)...)
+                                          .template reenter_from<ReentryFromState>();
+        this->step_internal(action);
+    }
+
+    // 强制全栈重入
+    template <typename TargetState, typename... Args>
+    void step_reenter_all(Args&&... args) {
+        StateAction<Context> action =
+            StateAction<Context>::template step<TargetState>(std::forward<Args>(args)...).reenter_all();
         this->step_internal(action);
     }
 

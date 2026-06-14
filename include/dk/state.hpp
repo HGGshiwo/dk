@@ -39,6 +39,36 @@ constexpr std::string_view get_type_name() {
 #endif
 }
 
+// ==========================================
+// 【新增】HSM 状态识别黑魔法 (Tmpl Reflection)
+// ==========================================
+// 1. Tag 基类
+template <template <typename...> class Tmpl>
+class TmplBase {
+   public:
+    virtual ~TmplBase() = default;
+};
+// 2. BaseState 混入的空基类 (防止普通类继承报错)
+struct EmptyMixin {};
+// 3. 供 BaseState 继承时使用的萃取器
+template <typename T>
+struct AutoExtractTmpl {
+    using type = EmptyMixin;
+};
+template <template <typename...> class Tmpl, typename... Args>
+struct AutoExtractTmpl<Tmpl<Args...>> {
+    using type = TmplBase<Tmpl>;
+};
+// 4. 动态转换目标选择器 (Cast Target Router)
+template <typename T>
+struct CastTargetType {
+    using type = T;
+};
+template <template <typename...> class Tmpl, typename... Args>
+struct CastTargetType<Tmpl<Args...>> {
+    using type = TmplBase<Tmpl>;
+};
+
 // 前置声明
 template <typename Context>
 class IState;
@@ -82,6 +112,11 @@ class StateAction {
     Type type = Type::UNHANDLED;
     // 重点：签名大幅度简化
     std::function<void(IStatePathBuilder<Context>& builder)> path_builder;
+
+    bool force_full_reentry = false;
+    // +++ 新增：类型擦除的断言函数 +++
+    std::function<bool(IState<Context>*)> reentry_predicate;
+
     static StateAction unhandled() { return {Type::UNHANDLED, nullptr}; }
     static StateAction handled() { return {Type::HANDLED, nullptr}; }
     template <typename TargetState, typename... Tuples>
@@ -94,6 +129,27 @@ class StateAction {
                        args_pack);
         });
         return action;
+    }
+
+    StateAction& reenter_all() {
+        force_full_reentry = true;
+        return *this;
+    }
+
+    // +++ 新增：模板化重入接口 +++
+    template <typename TargetType>
+    StateAction& reenter_from() {
+        // 完美复用你 is_active_state 中的类型推导黑魔法
+        using CleanType = std::decay_t<TargetType>;
+        using TargetCast = typename CastTargetType<CleanType>::type;
+
+        // 生成一个运行时断言，供底层引擎比对
+        reentry_predicate = [](IState<Context>* state) {
+            if (!state) return false;
+            // 只要能成功 cast，说明遇到了目标节点
+            return dynamic_cast<TargetCast*>(state) != nullptr;
+        };
+        return *this;
     }
 };
 
@@ -188,37 +244,6 @@ class IEventHandler : public BaseInterface {
         }
         return false;
     }
-};
-
-// 1. Tag 基类 (和之前一样)
-template <template <typename...> class Tmpl>
-class TmplBase {
-   public:
-    virtual ~TmplBase() = default;
-};
-// 2. BaseState 混入的空基类 (防止普通类继承报错)
-struct EmptyMixin {};
-// 3. 供 BaseState 继承时使用的萃取器 (和之前基本一样)
-template <typename T>
-struct AutoExtractTmpl {
-    using type = EmptyMixin;
-};  // 普通类继承一个空壳即可
-template <template <typename...> class Tmpl, typename... Args>
-struct AutoExtractTmpl<Tmpl<Args...>> {
-    using type = TmplBase<Tmpl>;
-};
-// ==========================================
-// 【新增】4. 动态转换目标选择器 (Cast Target Router)
-// ==========================================
-// 默认情况：如果是普通类（如 InitState），转换目标就是它自己！
-template <typename T>
-struct CastTargetType {
-    using type = T;
-};
-// 偏特化情况：如果是模板实例（如 WalkState<Context>），转换目标是 TmplBase<WalkState>
-template <template <typename...> class Tmpl, typename... Args>
-struct CastTargetType<Tmpl<Args...>> {
-    using type = TmplBase<Tmpl>;
 };
 
 /*
