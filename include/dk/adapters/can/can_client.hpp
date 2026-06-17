@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -59,18 +60,31 @@ class CanClient {
 
     // 专门针对 CAN 帧的发送函数
     ssize_t send_frame(uint32_t can_id, const uint8_t* data, uint8_t dlc) {
-        if (dlc > 8) return -1;  // 标准 CAN 数据最多 8 字节 (CAN-FD 是 64 字节)
+        if (dlc > 8) return -1;
 
-        // 构造 Linux 内核规定的 CAN 帧结构体
         struct can_frame frame;
         std::memset(&frame, 0, sizeof(frame));
 
-        frame.can_id = can_id;
+        // 【关键排查点】：确定是标准帧还是扩展帧
+        // 如果你的 can_id 大于 0x7FF (即扩展帧)，需要打上标志位：
+        if (can_id > 0x7FF) {
+            frame.can_id = can_id | CAN_EFF_FLAG;
+        } else {
+            frame.can_id = can_id;
+        }
+
         frame.can_dlc = dlc;
         std::memcpy(frame.data, data, dlc);
 
-        // 使用标准的 write 或 sendto 发送结构体
         ssize_t sent_bytes = write(sockfd_, &frame, sizeof(struct can_frame));
+
+        // 【关键排查点】：打印详细错误信息
+        if (sent_bytes < 0) {
+            std::cerr << "Write failed! errno: " << errno << " (" << std::strerror(errno) << ")" << std::endl;
+        } else if (sent_bytes != sizeof(struct can_frame)) {
+            std::cerr << "Incomplete write!" << std::endl;
+        }
+
         return sent_bytes;
     }
 
