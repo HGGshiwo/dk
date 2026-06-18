@@ -49,7 +49,7 @@ function App() {
           
           {/* 底部按钮卡片 - 绝对定位，编辑模式时隐藏 */}
           {!isWaypointEditing && (
-            <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 20, padding: '16px' }}>
+            <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 20, padding: '16px 16px 32px 16px' }}>
               <ButtonGroup />
             </div>
           )}

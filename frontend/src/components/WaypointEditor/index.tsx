@@ -116,34 +116,28 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
     setWaypoints(next);
   }, []);
 
-  const [originData, setOriginData] = useState<any[]>([]);
+  // 从后端数据派生显示的航点
+  const backendWaypoints = React.useMemo<Waypoint[]>(() => {
+    return ((mission_data as WaypointData[]) || []).map((wp, idx) => ({
+      id: `backend-wp-${idx}`,
+      lat: wp.lat,
+      lon: wp.lon,
+      height: wp.alt,
+    }));
+  }, [mission_data]);
 
-  const latestWp = useRef<any[]>([]);
+  // 监听面板关闭：如果关闭面板，则强制退出编辑状态，丢弃未提交的修改
   useEffect(() => {
-    // 只要b变化，就更新ref的current值
-    latestWp.current = JSON.parse(JSON.stringify(waypoints));
-  }, [waypoints]);
-
-  useEffect(() => {
-    if (isEditing) {
-      setOriginData([...latestWp.current]);
+    if (!showWaypointPanel) {
+      setIsEditing(false);
     }
-  }, [isEditing]);
+  }, [showWaypointPanel]);
 
   const handleCancelEdit = useCallback(() => {
     setIsEditing(false);
-    const initialWaypoints = ((originData as Waypoint[]) || []).map(
-      (wp, idx) => ({
-        id: `wp-${Date.now()}-${idx}-${Math.random()}`,
-        lat: wp.lat,
-        lon: wp.lon,
-        height: wp.height,
-      }),
-    );
-    console.log(initialWaypoints);
-    setWaypoints(initialWaypoints);
-    historyRef.current = { undoStack: [initialWaypoints], redoStack: [] };
-  }, [originData]);
+    setShowWaypointPanel(false);
+    // 退出编辑状态后，下面的 useEffect 会自动将数据恢复为后端的 mission_data
+  }, []);
 
   const DEFAULT_SCALE = 10;
   const viewRef = useRef<ViewState>({
@@ -165,21 +159,25 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
     waypointsRef.current = waypoints;
   }, [waypoints]);
 
+  // 单向数据流：非编辑状态下，强制与后端 mission_data 同步
   useEffect(() => {
-    const newWaypoints = ((mission_data as WaypointData[]) || []).map(
-      (wp, idx) => ({
-        id: `wp-${Date.now()}-${idx}-${Math.random()}`,
-        lat: wp.lat,
-        lon: wp.lon,
-        height: wp.alt,
-      }),
-    );
-
-    if (newWaypoints.length > 0) {
-      pushToHistory(newWaypoints);
+    if (!isEditing) {
+      const newWaypoints = ((mission_data as WaypointData[]) || []).map(
+        (wp, idx) => ({
+          id: `wp-${Date.now()}-${idx}-${Math.random()}`,
+          lat: wp.lat,
+          lon: wp.lon,
+          height: wp.alt,
+        }),
+      );
       setWaypoints(newWaypoints);
+      // 清空历史记录栈并设为同步后的初始状态
+      historyRef.current = { undoStack: [newWaypoints], redoStack: [] };
     }
-  }, [pushToHistory, mission_data]);
+  }, [mission_data, isEditing]);
+
+  // 决定当前显示的数据流
+  const displayWaypoints = isEditing ? waypoints : backendWaypoints;
 
   const [followState, setFollowState] = useState({
     isDrawing: false,
@@ -355,16 +353,16 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
     ctx.lineTo(originX, canvas.height);
     ctx.stroke();
 
-    if (mode === "waypoint" && waypoints.length >= 2) {
+    if (mode === "waypoint" && displayWaypoints.length >= 2) {
       ctx.beginPath();
       ctx.strokeStyle = "#1890ff";
       ctx.lineWidth = 2;
       ctx.setLineDash([]);
-      const firstWorld = latLonToWorld(waypoints[0].lat, waypoints[0].lon);
+      const firstWorld = latLonToWorld(displayWaypoints[0].lat, displayWaypoints[0].lon);
       const first = worldToCanvas(firstWorld.x, firstWorld.y);
       ctx.moveTo(first.canvasX, first.canvasY);
-      for (let i = 1; i < waypoints.length; i++) {
-        const wpWorld = latLonToWorld(waypoints[i].lat, waypoints[i].lon);
+      for (let i = 1; i < displayWaypoints.length; i++) {
+        const wpWorld = latLonToWorld(displayWaypoints[i].lat, displayWaypoints[i].lon);
         const pt = worldToCanvas(wpWorld.x, wpWorld.y);
         ctx.lineTo(pt.canvasX, pt.canvasY);
       }
@@ -372,7 +370,7 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
     }
 
     if (mode === "waypoint") {
-      waypoints.forEach((wp, index) => {
+      displayWaypoints.forEach((wp, index) => {
         const wpWorld = latLonToWorld(wp.lat, wp.lon);
         const { canvasX, canvasY } = worldToCanvas(wpWorld.x, wpWorld.y);
         ctx.beginPath();
@@ -444,7 +442,7 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
 
     const interaction = interactionRef.current;
     if (interaction.type === "dragging-waypoint" && interaction.waypointId) {
-      const wp = waypoints.find((w) => w.id === interaction.waypointId);
+      const wp = displayWaypoints.find((w) => w.id === interaction.waypointId);
       if (wp) {
         const wpWorld = latLonToWorld(wp.lat, wp.lon);
         const { canvasX, canvasY } = worldToCanvas(wpWorld.x, wpWorld.y);
@@ -460,7 +458,7 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
     isLoading,
     drawGrid,
     mode,
-    waypoints,
+    displayWaypoints,
     followState.startPoint,
     followState.currentMousePoint,
     latLonToWorld,
@@ -483,7 +481,7 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
   // 状态变化时请求重绘
   useEffect(() => {
     requestRedraw();
-  }, [mode, waypoints, followState, isLoading, requestRedraw]);
+  }, [mode, displayWaypoints, followState, isLoading, requestRedraw]);
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -497,14 +495,14 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
 
       if (mode === "waypoint") {
         if (e.button === 0) {
-          const hit = waypoints.find((wp) => {
+          const hit = showWaypointPanel ? waypoints.find((wp) => {
             const wpWorld = latLonToWorld(wp.lat, wp.lon);
             const { canvasX: wpX, canvasY: wpY } = worldToCanvas(
               wpWorld.x,
               wpWorld.y,
             );
             return Math.hypot(canvasX - wpX, canvasY - wpY) < HIT_TOLERANCE;
-          });
+          }) : null;
 
           if (hit) {
             if (!isEditing) setIsEditing(true);
@@ -551,7 +549,7 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
         }
       }
     },
-    [isEditing, latLonToWorld, mode, pushToHistory, waypoints],
+    [isEditing, latLonToWorld, mode, pushToHistory, waypoints, showWaypointPanel],
   );
 
   const handleMouseMove = useCallback(
@@ -654,7 +652,8 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
         if (
           e.button === 0 &&
           interaction.type === "none" &&
-          interaction.startCanvas
+          interaction.startCanvas &&
+          showWaypointPanel
         ) {
           if (!isEditing) setIsEditing(true);
           const dist = Math.hypot(
@@ -712,6 +711,7 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
       originRef,
       worldToLatLon,
       followState.isDrawing,
+      showWaypointPanel,
     ],
   );
 
@@ -816,14 +816,14 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
       return;
     }
     const data = waypoints.map((wp) => [wp.lon, wp.lat, wp.height]);
-    pushToHistory(waypoints);
     httpRequest("POST", waypointSubmitUrl, { waypoint: data })
       .then(() => {
         message.success("航点提交成功");
         setIsEditing(false);
+        setShowWaypointPanel(false);
       })
       .catch(() => message.error("航点提交失败"));
-  }, [waypoints, waypointSubmitUrl, pushToHistory]);
+  }, [waypoints, waypointSubmitUrl]);
 
   const moveWaypoint = (index: number, direction: "up" | "down") => {
     setIsEditing(true);
@@ -981,6 +981,7 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
         <canvas
           ref={canvasRef}
           className="canvas"
+          style={{ cursor: showWaypointPanel ? "crosshair" : "grab" }}
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
@@ -992,7 +993,7 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
             重置视图
           </Button>
         </div>
-        
+
         {/* 右侧悬浮的航点编辑按钮 */}
         <div style={{
           position: 'absolute',
@@ -1013,7 +1014,7 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
           </Button>
         </div>
       </div>
-      
+
       {/* 底部航点编辑面板 */}
       {showWaypointPanel && (
         <div style={{
@@ -1065,14 +1066,13 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
                 </div>
               </div>
               <Table
-                dataSource={waypoints}
+                dataSource={displayWaypoints}
                 columns={columns}
                 rowKey="id"
                 size="small"
                 pagination={false}
                 scroll={{ y: 200 }}
                 rowClassName={(_, index) => {
-                  if (isEditing) return "";
                   const wpIdx = wp_idx as number | undefined;
                   if (wpIdx !== undefined && wpIdx === index) {
                     return "waypoint-highlight";
@@ -1170,5 +1170,6 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
     </div>
   );
 };
+
 
 export default WaypointEditor;

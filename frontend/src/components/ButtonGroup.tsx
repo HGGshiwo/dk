@@ -76,7 +76,7 @@ export const ButtonGroup = () => {
         cols = 3; // 移动端：3列，每页9个按钮
       }
       
-      const rows = 3; // 固定3行
+      const rows = 2; // 固定2行
       setButtonsPerPage(cols * rows);
     };
 
@@ -102,14 +102,14 @@ export const ButtonGroup = () => {
     setActiveTab(groups[0]);
   }
 
-  // 计算固定高度：3行按钮 + 分页器
+  // 计算固定高度：2行按钮 + 分页器
   const buttonHeight = 32;
   const rowGap = 8;
   const cardPadding = 12;
   const tabBarHeight = groups.length > 1 ? 40 : 0;
   const paginationHeight = 32;
   
-  const rows = 3; // 固定3行
+  const rows = 2; // 固定2行
   const contentHeight = rows * buttonHeight + (rows - 1) * rowGap;
   const totalHeight = contentHeight + cardPadding * 2 + tabBarHeight + paginationHeight;
 

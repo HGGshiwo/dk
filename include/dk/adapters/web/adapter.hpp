@@ -416,15 +416,32 @@ class HttpSession : public std::enable_shared_from_this<HttpSession<AdapterType>
         if (fs::is_directory(full_path)) {
             full_path /= "index.html";
         }
+
+        std::string target_path = full_path.string();
+        std::string mime_type = std::string(get_mime_type(target_path));
+        bool use_gzip = false;
+
+        // 【GZIP 核心逻辑】检查浏览器是否支持 gzip，并且本地是否存在对应的 .gz 文件
+        auto it = req_.find(http::field::accept_encoding);
+        if (it != req_.end() && it->value().find("gzip") != boost::beast::string_view::npos) {
+            std::string gz_path = target_path + ".gz";
+            if (fs::exists(gz_path) && !fs::is_directory(gz_path)) {
+                target_path = gz_path;
+                use_gzip = true;
+            }
+        }
+
         beast::error_code ec;
         http::file_body::value_type file;
-        file.open(full_path.string().c_str(), beast::file_mode::scan, ec);
+        file.open(target_path.c_str(), beast::file_mode::scan, ec);
+
         // 文件打开失败 (不存在或无权限)
         if (ec) {
-            spdlog::error("[WebAdapter] file {} not available: {}", full_path.string(), ec.message());
+            spdlog::error("[WebAdapter] file {} not available: {}", target_path, ec.message());
             send_http_response(http::status::not_found, "File not found");
             return;
         }
+
         // 构造文件响应体
         file_res_ = std::make_shared<http::response<http::file_body>>(
             std::piecewise_construct, std::make_tuple(std::move(file)),
@@ -434,7 +451,15 @@ class HttpSession : public std::enable_shared_from_this<HttpSession<AdapterType>
             file_res_->set(http::field::access_control_allow_origin, adapter_->cors_origin_);
         }
         file_res_->set(http::field::server, "WebAdapter");
-        file_res_->set(http::field::content_type, get_mime_type(full_path.string()));
+
+        // 即使发送的是 .gz 文件，Content-Type 依然必须是原始文件类型 (如 application/javascript)
+        file_res_->set(http::field::content_type, mime_type);
+
+        // 告诉浏览器我们发送的是经过 gzip 压缩的内容，请在客户端解压
+        if (use_gzip) {
+            file_res_->set(http::field::content_encoding, "gzip");
+        }
+
         file_res_->keep_alive(req_.keep_alive());
         file_res_->prepare_payload();
         // 异步写出文件
