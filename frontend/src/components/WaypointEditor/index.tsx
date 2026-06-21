@@ -8,6 +8,7 @@ import {
   message,
   Radio,
 } from "antd";
+import { AimOutlined, EditOutlined, CloseOutlined, ProfileOutlined } from '@ant-design/icons';
 import type { ColumnsType } from "antd/es/table";
 import "./WaypointEditor.css";
 import { useAppStore } from "../../store/useAppStore";
@@ -988,30 +989,48 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
           onMouseLeave={handleMouseLeave}
           onContextMenu={handleContextMenu}
         />
-        <div className="canvas-controls">
-          <Button size="small" ref={btnRef}>
-            重置视图
-          </Button>
-        </div>
-
-        {/* 右侧悬浮的航点编辑按钮 */}
+        {/* 右侧悬浮的按钮组 */}
         <div style={{
           position: 'absolute',
           top: '50%',
           right: '16px',
           transform: 'translateY(-50%)',
-          zIndex: 5
+          zIndex: 5,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '16px'
         }}>
-          <Button 
-            type="primary"
-            size="large"
-            onClick={() => setShowWaypointPanel(!showWaypointPanel)}
-            style={{
-              boxShadow: '0 4px 12px rgba(0,0,0,0.15)'
-            }}
-          >
-            {showWaypointPanel ? '关闭编辑' : '航点编辑'}
-          </Button>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
+            <Button 
+              shape="circle"
+              icon={<AimOutlined />}
+              ref={btnRef}
+              style={{ boxShadow: '0 4px 12px rgba(0,0,0,0.15)' }}
+            />
+            <span style={{ fontSize: '12px', color: '#666', fontWeight: 500 }}>重置</span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
+            <Button 
+              type={showWaypointPanel ? "default" : "primary"}
+              shape="circle"
+              icon={showWaypointPanel ? <CloseOutlined /> : <EditOutlined />}
+              onClick={() => setShowWaypointPanel(!showWaypointPanel)}
+              style={{ boxShadow: '0 4px 12px rgba(0,0,0,0.15)' }}
+            />
+            <span style={{ fontSize: '12px', color: '#666', fontWeight: 500 }}>
+              {showWaypointPanel ? '关闭' : '航点'}
+            </span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
+            <Button 
+              type="primary"
+              shape="circle"
+              icon={<ProfileOutlined />}
+              onClick={() => useAppStore.getState().setLogboxVisible(true)}
+              style={{ boxShadow: '0 4px 12px rgba(0,0,0,0.15)' }}
+            />
+            <span style={{ fontSize: '12px', color: '#666', fontWeight: 500 }}>日志</span>
+          </div>
         </div>
       </div>
 

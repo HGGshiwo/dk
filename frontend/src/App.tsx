@@ -5,7 +5,7 @@ import { ButtonGroup } from "./components/ButtonGroup";
 import { useAppStore, cleanupWebSocket } from "./store/useAppStore";
 import { VirtualJoystickGroup } from "./components/VirtualJoystick";
 import LogOutputBox from "./components/LogOutputBox/indext";
-import { ConfigProvider, Spin, type ThemeConfig } from "antd";
+import { ConfigProvider, Spin, Modal, type ThemeConfig } from "antd";
 import WaypointEditor from "./components/WaypointEditor";
 
 function App() {
@@ -19,6 +19,8 @@ function App() {
 
   const initApp = useAppStore((state) => state.initApp);
   const wsStatus = useAppStore((state) => state.wsStatus);
+  const logboxVisible = useAppStore((state) => state.logboxVisible);
+  const setLogboxVisible = useAppStore((state) => state.setLogboxVisible);
   useEffect(() => {
     initApp();
     return () => {
@@ -57,8 +59,17 @@ function App() {
           {/* 隐藏的组件 - 如果需要可以调整 */}
           <div className="hidden">
             <VirtualJoystickGroup />
-            <LogOutputBox />
           </div>
+          
+          <Modal
+            open={logboxVisible}
+            onCancel={() => setLogboxVisible(false)}
+            footer={null}
+            width={800}
+            destroyOnClose={false}
+          >
+            <LogOutputBox title={null} />
+          </Modal>
         </div>
       </ConfigProvider>
     </Spin>

@@ -1,5 +1,5 @@
 import React, { useState, type FC, useRef, useEffect, useMemo } from "react";
-import { Radio, Card, type RadioChangeEvent } from "antd";
+import { Radio, type RadioChangeEvent } from "antd";
 import "./index.css";
 import { useAppStore } from "../../store/useAppStore";
 
@@ -12,7 +12,7 @@ export interface LogItem {
 export interface LogOutputBoxProps {
   initialLogs?: LogItem[];
   logListHeight?: string | number;
-  title?: string;
+  title?: React.ReactNode;
   maxLogCount?: number;
 }
 
@@ -35,7 +35,6 @@ const scrollToTop = (container: HTMLDivElement | null) => {
 const LogOutputBox: FC<LogOutputBoxProps> = ({
   initialLogs = [],
   logListHeight = 300,
-  title = "日志输出框",
 }) => {
   const { stateData, config } = useAppStore();
 
@@ -49,6 +48,7 @@ const LogOutputBox: FC<LogOutputBoxProps> = ({
     () => Object.values(config?.logbox || {}),
     [config],
   );
+  
   useEffect(() => {
     const logListData = logTypeConfigs.map((config) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -108,11 +108,7 @@ const LogOutputBox: FC<LogOutputBoxProps> = ({
   };
 
   return (
-    <Card
-      className="mb-2 w-full"
-      title={title}
-      style={{ boxShadow: "0 2px 8px rgba(0,0,0,0.08)" }}
-    >
+    <div className="w-full">
       <div className="log-type-selector">
         <span className="selector-label">日志类型：</span>
         <Radio.Group
@@ -166,7 +162,7 @@ const LogOutputBox: FC<LogOutputBoxProps> = ({
           })
         )}
       </div>
-    </Card>
+    </div>
   );
 };
 

@@ -28,6 +28,8 @@ interface AppState {
   updateModalFormData: (data: Record<string, unknown> | object) => void;
   resetModalFormData: () => void;
   initApp: () => void;
+  logboxVisible: boolean;
+  setLogboxVisible: (visible: boolean) => void;
 }
 
 let wsInstance: WebSocket | null = null;
@@ -126,6 +128,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   modalFormData: {},
   config: null,
   isLoading: true,
+  logboxVisible: false,
+
+  setLogboxVisible: (visible) => set({ logboxVisible: visible }),
 
   setModalVisible: (visible, key) => {
     set({ modalVisible: visible });
