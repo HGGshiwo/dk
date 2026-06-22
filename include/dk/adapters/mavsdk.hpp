@@ -6,11 +6,16 @@
 #include <mavsdk/plugins/offboard/offboard.h>
 #include <mavsdk/plugins/param/param.h>
 #include <mavsdk/plugins/telemetry/telemetry.h>
+#include <mavsdk/system.h>
+#include <mavsdk/vehicle.h>
+#include <spdlog/spdlog.h>
 
 #include <functional>
 #include <memory>
 
 #include "dk/adapters/base.hpp"
+
+enum class VehicleType { Copter, Rover, Unknown };
 
 namespace dk {
 
@@ -40,6 +45,21 @@ class MavsdkAdapter : public BaseAdapter<Context, DerivedEngine> {
     std::shared_ptr<mavsdk::Action> get_action() { return action_; }
     std::shared_ptr<mavsdk::Offboard> get_offboard() { return offboard_; }
     std::shared_ptr<mavsdk::Param> get_param() { return param_; }
+
+    VehicleType get_target_type() {
+        auto telemetry_vehicle_type = system_->vehicle_type();
+
+        if (telemetry_vehicle_type == mavsdk::Vehicle::GroundRover) {
+            spdlog::info("Detected vehicle type: Rover");
+            return VehicleType::Rover;
+        } else if (telemetry_vehicle_type == mavsdk::Vehicle::Quadrotor) {
+            spdlog::info("Detected vehicle type: Copter");
+            return VehicleType::Copter;
+        } else {
+            spdlog::warn("Unknown vehicle type, default to Copter logic or unsupported.");
+            return VehicleType::Unknown;
+        }
+    }
 
     template <typename SubscribeFunc, typename Callback>
     void bind_system_context(SubscribeFunc sub_func, Callback cb) {
