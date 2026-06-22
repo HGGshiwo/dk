@@ -243,4 +243,4 @@ function VirtualJoystickGroup() {
   );
 }
 
-export { VirtualJoystickGroup };
+export { VirtualJoystickGroup, VirtualJoystick };

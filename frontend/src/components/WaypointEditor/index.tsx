@@ -8,12 +8,13 @@ import {
   message,
   Radio,
 } from "antd";
-import { AimOutlined, EditOutlined, CloseOutlined, ProfileOutlined } from '@ant-design/icons';
+import { AimOutlined, EditOutlined, CloseOutlined, ProfileOutlined, ControlOutlined } from '@ant-design/icons';
 import type { ColumnsType } from "antd/es/table";
 import "./WaypointEditor.css";
 import { useAppStore } from "../../store/useAppStore";
 import { httpRequest } from "../../utils";
 import { useOrigin } from "./hooks";
+import { VirtualJoystick } from "../VirtualJoystick";
 
 interface Point {
   x: number;
@@ -62,11 +63,33 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
 }) => {
   const [mode, setMode] = useState<"waypoint" | "follow">("waypoint");
   const [showWaypointPanel, setShowWaypointPanel] = useState(false); // 控制航点面板显示
+  const [showJoystick, setShowJoystick] = useState(false); // 控制虚拟摇杆显示
+  const joystickState = useRef({ x: 0, y: 0, z: 0, w: 0 });
 
-  // 当编辑模式改变时通知父组件
   useEffect(() => {
-    onEditModeChange?.(showWaypointPanel);
-  }, [showWaypointPanel, onEditModeChange]);
+    // 每次打开或关闭时，通知后端摇杆使能状态
+    httpRequest("POST", "/joystick/enable", { enable: showJoystick });
+
+    let interval: ReturnType<typeof setInterval>;
+    if (showJoystick) {
+      interval = setInterval(() => {
+        httpRequest("POST", "/cmd_vel", {
+          x: joystickState.current.x,
+          y: joystickState.current.y,
+          z: joystickState.current.z,
+          w: joystickState.current.w,
+        });
+      }, 100);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [showJoystick]);
+
+  // 当编辑模式或摇杆显示状态改变时通知父组件隐藏底部 ButtonGroup
+  useEffect(() => {
+    onEditModeChange?.(showWaypointPanel || showJoystick);
+  }, [showWaypointPanel, showJoystick, onEditModeChange]);
 
   const [isEditing, setIsEditing] = useState(false);
   const mission_data = useAppStore((state) => state.stateData.mission_data);
@@ -1023,6 +1046,18 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
             <Button 
+              type={showJoystick ? "default" : "primary"}
+              shape="circle"
+              icon={showJoystick ? <CloseOutlined /> : <ControlOutlined />}
+              onClick={() => setShowJoystick(!showJoystick)}
+              style={{ boxShadow: '0 4px 12px rgba(0,0,0,0.15)' }}
+            />
+            <span style={{ fontSize: '12px', color: '#666', fontWeight: 500 }}>
+              {showJoystick ? '关闭' : '摇杆'}
+            </span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
+            <Button 
               type="primary"
               shape="circle"
               icon={<ProfileOutlined />}
@@ -1033,6 +1068,38 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
           </div>
         </div>
       </div>
+
+      {showJoystick && (
+        <div style={{
+          position: 'absolute',
+          bottom: '120px', // 向上移动避免被底部遮挡
+          left: '40px',
+          right: '40px',
+          display: 'flex',
+          justifyContent: 'space-between',
+          zIndex: 50, // 提高层级
+          pointerEvents: 'none'
+        }}>
+          <div style={{ pointerEvents: 'auto' }}>
+            <VirtualJoystick
+              onMove={(data) => {
+                // 左手: 上是z, 右是w
+                joystickState.current.z = data.y; 
+                joystickState.current.w = data.x;
+              }}
+            />
+          </div>
+          <div style={{ pointerEvents: 'auto' }}>
+            <VirtualJoystick
+              onMove={(data) => {
+                // 右手: 上是x, 右是y
+                joystickState.current.x = data.y;
+                joystickState.current.y = data.x;
+              }}
+            />
+          </div>
+        </div>
+      )}
 
       {/* 底部航点编辑面板 */}
       {showWaypointPanel && (
