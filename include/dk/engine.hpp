@@ -617,13 +617,24 @@ class BaseEngine : public IEventHandler<IEngine<Context>, Context, void, Derived
 
     // 使用到了真实类型作为模板参数
     // 为若干个事件注册【一个】监听器，如果return False则继续监听
+    // 该函数会立即注册，防止在同一个线程中错过随后的 dispatch
     Future<bool> wait_internal(std::function<bool(const std::any&)> predicate, CancellationToken token) override {
         auto promise = std::make_shared<Promise<bool>>(this->shared_from_this(), token);
         Future<bool> future = promise->get_future();
-        boost::asio::post(this->io_context_, [this, predicate = std::move(predicate), promise]() mutable {
+
+        auto register_task = [this, predicate = std::move(predicate), promise]() mutable {
             uint64_t id = ++(this->next_wait_id_);
             this->active_waits_[id] = std::make_shared<WaitNode>(WaitNode{id, std::move(predicate), promise});
-        });
+        };
+
+        // 如果当前已经在引擎的工作线程中，立刻同步注册！防止错过随后的 dispatch
+        if (std::this_thread::get_id() == this->get_thread_id()) {
+            register_task();
+        } else {
+            // 如果是外部线程发起的 wait，再扔进队列
+            boost::asio::post(this->io_context_, std::move(register_task));
+        }
+
         return future;
     }
 };
