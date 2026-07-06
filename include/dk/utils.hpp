@@ -36,23 +36,48 @@ struct can_handle<EventT, TypeList<Fs...>> {
     static constexpr bool value = (std::is_invocable_v<Fs, EventT> || ...);
 };
 
+// 1. 内部实现类：专门处理干净的类型（没有引用和外层 const）
 template <typename T>
-struct extract_ros_msg {
+struct extract_ros_msg_impl {
     using type = T;  // 默认情况：如果是普通对象，直接返回
 };
-// 匹配 std::shared_ptr<const T> (ROS 2 常用)
-template <typename T>
-struct extract_ros_msg<std::shared_ptr<const T>> {
-    using type = T;
-};
-// 匹配 boost::shared_ptr<const T> (ROS 1 常用 ConstPtr 底层类型)
-// 注意：如果使用 ROS 1，请取消下方注释并引入 boost 头文件
 
+// 匹配 ROS2: std::shared_ptr<T> (非 const)
 template <typename T>
-struct extract_ros_msg<boost::shared_ptr<const T>> {
+struct extract_ros_msg_impl<std::shared_ptr<T>> {
     using type = T;
 };
 
+// 匹配 ROS2: std::shared_ptr<const T> (常用来接收不可变消息)
+template <typename T>
+struct extract_ros_msg_impl<std::shared_ptr<const T>> {
+    using type = T;
+};
+
+#ifdef USE_ROS1
+// 匹配 ROS1: boost::shared_ptr<T>
+template <typename T>
+struct extract_ros_msg_impl<boost::shared_ptr<T>> {
+    using type = T;
+};
+
+// 匹配 ROS1: boost::shared_ptr<const T> (即 MsgType::ConstPtr)
+template <typename T>
+struct extract_ros_msg_impl<boost::shared_ptr<const T>> {
+    using type = T;
+};
+#endif
+
+// 2. 对外暴露的接口：先"净化"类型，再提取
+template <typename T>
+struct extract_ros_msg {
+    // std::decay_t 会把 `const std::shared_ptr<const T>&` 变成
+    // `std::shared_ptr<const T>`
+    using decayed_type = typename std::decay<T>::type;
+
+    // 把净化后的类型交给 impl 去精确匹配提取
+    using type = typename extract_ros_msg_impl<decayed_type>::type;
+};
 /*
 分析函数的入参和返回值，使用方法：
 
@@ -69,7 +94,8 @@ std::cout << "参数总数: " << Traits::arg_count << std::endl;
 ```
 */
 template <typename T>
-struct callable_traits : callable_traits<decltype(&std::decay_t<T>::operator())> {};
+struct callable_traits
+    : callable_traits<decltype(&std::decay_t<T>::operator())> {};
 // 1. 匹配普通函数指针
 template <typename R, typename... Args>
 struct callable_traits<R (*)(Args...)> {

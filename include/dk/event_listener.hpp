@@ -13,5 +13,6 @@ class IEventListener {
 
 // 继承 IEventHandler，返回类型指定为 void
 template <typename Context, typename Derived>
-class BaseEventListener : public IEventHandler<IEventListener<Context>, Context, void, Derived> {};
+class BaseEventListener
+    : public IEventHandler<IEventListener<Context>, Context, void, Derived> {};
 }  // namespace dk

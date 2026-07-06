@@ -35,7 +35,8 @@ class IProtocolHandler {
 
     // session: 当前的 HTTP 会话 (可以用来回传响应，或者移出 Socket 升级协议)
     // req: 初始的 HTTP 请求
-    virtual void handle(std::shared_ptr<HttpSession<AdapterType>> session, http::request<http::string_body> req) = 0;
+    virtual void handle(std::shared_ptr<HttpSession<AdapterType>> session,
+                        http::request<http::string_body> req) = 0;
 };
 
 // ==========================================
@@ -58,7 +59,8 @@ class WsConnection : public std::enable_shared_from_this<WsConnection> {
     virtual void handle_ack(uint64_t msg_id) = 0;
 
     // Send state-based reliable message with a specific key
-    virtual void send_state(const std::string& state_key, nlohmann::json msg_json) = 0;
+    virtual void send_state(const std::string& state_key,
+                            nlohmann::json msg_json) = 0;
 };
 
 // ==========================================
@@ -66,7 +68,8 @@ class WsConnection : public std::enable_shared_from_this<WsConnection> {
 // ==========================================
 struct WsEndpoint {
     std::function<void(std::shared_ptr<WsConnection>)> on_open = [](auto) {};
-    std::function<void(std::shared_ptr<WsConnection>, std::string)> on_message = [](auto, auto) {};
+    std::function<void(std::shared_ptr<WsConnection>, std::string)> on_message =
+        [](auto, auto) {};
     std::function<void(std::shared_ptr<WsConnection>)> on_close = [](auto) {};
 };
 
@@ -92,13 +95,15 @@ class ConnectionManager {
     void add(std::shared_ptr<WsConnection> conn) {
         std::lock_guard<std::mutex> lock(mutex_);
         connections_[conn->get_id()] = conn;
-        spdlog::info("[ConnectionManager] Client connected. Total: {}", connections_.size());
+        spdlog::info("[ConnectionManager] Client connected. Total: {}",
+                     connections_.size());
     }
 
     void remove(std::shared_ptr<WsConnection> conn) {
         std::lock_guard<std::mutex> lock(mutex_);
         connections_.erase(conn->get_id());
-        spdlog::info("[ConnectionManager] Client disconnected. Total: {}", connections_.size());
+        spdlog::info("[ConnectionManager] Client disconnected. Total: {}",
+                     connections_.size());
     }
 
     void publish(const nlohmann::json& msg_json) {
@@ -112,13 +117,15 @@ class ConnectionManager {
     void publish_reliable(const nlohmann::json& msg_json) {
         std::lock_guard<std::mutex> lock(mutex_);
         for (auto& [id, conn] : connections_) {
-            // Each connection will copy the JSON, assign its own msg_id, and track it
+            // Each connection will copy the JSON, assign its own msg_id, and
+            // track it
             conn->send_reliable(msg_json);
         }
     }
 
     // Broadcast a state-based reliable message to all connected clients
-    void publish_state(const std::string& state_key, const nlohmann::json& msg_json) {
+    void publish_state(const std::string& state_key,
+                       const nlohmann::json& msg_json) {
         std::lock_guard<std::mutex> lock(mutex_);
         for (auto& [id, conn] : connections_) {
             conn->send_state(state_key, msg_json);

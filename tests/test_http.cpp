@@ -60,17 +60,21 @@ class WebAdapterRealTestSuite : public ::testing::Test {
         engine = std::make_shared<TestEngine>();
 
         // 初始化真实的 WebAdapter
-        adapter = std::make_shared<dk::WebAdapter<AppContext, TestEngine>>(engine, TEST_PORT);
+        adapter = std::make_shared<dk::WebAdapter<AppContext, TestEngine>>(
+            engine, TEST_PORT);
 
         // 注册 HTTP 路由
-        adapter->register_route<AsyncLoginEvent, TestLoginResult>(http::verb::post, "/api/login");
+        adapter->register_route<AsyncLoginEvent, TestLoginResult>(
+            http::verb::post, "/api/login");
 
         // 注册 WebSocket 路由
         dk::WsEndpoint ws_endpoint;
-        ws_endpoint.on_open = [](std::shared_ptr<dk::WsConnection> conn) -> void {
+        ws_endpoint.on_open =
+            [](std::shared_ptr<dk::WsConnection> conn) -> void {
             conn->send(R"({"type": "welcome"})");
         };
-        ws_endpoint.on_message = [](std::shared_ptr<dk::WsConnection> conn, std::string msg) {
+        ws_endpoint.on_message = [](std::shared_ptr<dk::WsConnection> conn,
+                                    std::string msg) {
             conn->send("Echo: " + msg);
             if (msg == "quit") {
                 conn->close();
@@ -164,7 +168,8 @@ TEST_F(WebAdapterRealTestSuite, RealWebSocketConnectionTest) {
 
     // 3. 测试 on_open：读取服务端主动发来的欢迎消息
     ws.read(buffer);
-    EXPECT_EQ(beast::buffers_to_string(buffer.data()), R"({"type": "welcome"})");
+    EXPECT_EQ(beast::buffers_to_string(buffer.data()),
+              R"({"type": "welcome"})");
     buffer.consume(buffer.size());
 
     // 4. 测试 on_message：客户端发送 "hello"

@@ -3,7 +3,7 @@ BasedOnStyle: Google
 Language: Cpp
 Standard: c++17
 IndentWidth: 4
-ColumnLimit: 120
+ColumnLimit: 80
 
 # 指针/引用靠近变量名 (例如: int *a 变为 int* a)
 PointerAlignment: Left

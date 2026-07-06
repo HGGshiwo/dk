@@ -13,8 +13,8 @@ struct EvPong {};
 struct EvTriggerInternal {};
 struct EvAsyncQuery : dk::AsyncEvent<int> {};  // 异步事件，返回 int
 
-using TestEvent =
-    std::variant<dk::TickEvent, dk::EnterEvent, dk::ExitEvent, EvPing, EvPong, EvTriggerInternal, EvAsyncQuery>;
+using TestEvent = std::variant<dk::TickEvent, dk::EnterEvent, dk::ExitEvent,
+                               EvPing, EvPong, EvTriggerInternal, EvAsyncQuery>;
 
 // 测试上下文，用于记录测试结果
 struct TestContext : dk::BaseContext<TestContext> {
@@ -83,7 +83,8 @@ StateA::StateAction StateA::on_event(const EvAsyncQuery& e, TestContext& ctx) {
 }
 
 // 测试微队列派发
-StateA::StateAction StateA::on_event(const EvTriggerInternal&, TestContext& ctx) {
+StateA::StateAction StateA::on_event(const EvTriggerInternal&,
+                                     TestContext& ctx) {
     std::lock_guard<std::mutex> lock(ctx.log_mtx);
     ctx.log.push_back("Trigger_Macro");
     // 投递微队列（高优）
@@ -119,7 +120,8 @@ TEST_F(DkFrameworkTest, BasicStateTransitionAndHooks) {
     // 等待后台线程处理完毕 (简单的同步手段)
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-    const auto& log = engine->get_context().log;  // 假设你在 Engine 里加了 get_context()
+    const auto& log =
+        engine->get_context().log;  // 假设你在 Engine 里加了 get_context()
 
     std::lock_guard<std::mutex> lock(engine->get_context().log_mtx);
     EXPECT_EQ(engine->get_context().ping_count, 1);
@@ -135,17 +137,22 @@ TEST_F(DkFrameworkTest, BasicStateTransitionAndHooks) {
 TEST_F(DkFrameworkTest, MicroQueuePriority) {
     // 连续投递两个宏任务
     engine->dispatch(EvTriggerInternal{});
-    engine->dispatch(EvPong{});  // 这个任务应该被推迟，直到 EvTriggerInternal 触发的微任务执行完
+    engine->dispatch(EvPong{});  // 这个任务应该被推迟，直到 EvTriggerInternal
+                                 // 触发的微任务执行完
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     const auto& log = engine->get_context().log;
     std::lock_guard<std::mutex> lock(engine->get_context().log_mtx);
     // 核心逻辑：EvTriggerInternal 会触发内部事件 EvPing。
-    // 框架要求必须先把 EvPing（内部微队列）处理完，再去处理后面的宏任务 EvPong。
-    auto trigger_idx = std::find(log.begin(), log.end(), "Trigger_Macro") - log.begin();
-    auto ping_idx = std::find(log.begin(), log.end(), "Ping_Handled") - log.begin();
-    auto pong_idx = std::find(log.begin(), log.end(), "Pong_Handled") - log.begin();
+    // 框架要求必须先把 EvPing（内部微队列）处理完，再去处理后面的宏任务
+    // EvPong。
+    auto trigger_idx =
+        std::find(log.begin(), log.end(), "Trigger_Macro") - log.begin();
+    auto ping_idx =
+        std::find(log.begin(), log.end(), "Ping_Handled") - log.begin();
+    auto pong_idx =
+        std::find(log.begin(), log.end(), "Pong_Handled") - log.begin();
 
     // 验证相对顺序：Trigger -> Ping(微队列抢占) -> Pong(宏队列滞后)
     EXPECT_LT(trigger_idx, ping_idx);

@@ -31,7 +31,8 @@ class CanClient {
         std::strncpy(ifr.ifr_name, iface_name.c_str(), IFNAMSIZ - 1);
         if (ioctl(sockfd_, SIOCGIFINDEX, &ifr) < 0) {
             close(sockfd_);
-            throw std::runtime_error("Failed to find CAN interface: " + iface_name);
+            throw std::runtime_error("Failed to find CAN interface: " +
+                                     iface_name);
         }
 
         // 3. 绑定 Socket 到指定的 CAN 接口
@@ -80,7 +81,8 @@ class CanClient {
 
         // 【关键排查点】：打印详细错误信息
         if (sent_bytes < 0) {
-            std::cerr << "Write failed! errno: " << errno << " (" << std::strerror(errno) << ")" << std::endl;
+            std::cerr << "Write failed! errno: " << errno << " ("
+                      << std::strerror(errno) << ")" << std::endl;
         } else if (sent_bytes != sizeof(struct can_frame)) {
             std::cerr << "Incomplete write!" << std::endl;
         }

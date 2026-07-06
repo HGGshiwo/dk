@@ -12,7 +12,8 @@ namespace dk {
 template <typename T, typename = void>
 struct has_allowed_events : std::false_type {};
 template <typename T>
-struct has_allowed_events<T, std::void_t<typename T::AllowedEvents>> : std::true_type {};
+struct has_allowed_events<T, std::void_t<typename T::AllowedEvents>>
+    : std::true_type {};
 
 // 严苛的探针：检查类中是否写了匹配类型的 on_event
 template <typename T, typename Event, typename Context, typename = void>
@@ -20,20 +21,24 @@ struct has_on_event : std::false_type {};
 template <typename T, typename Event, typename Context>
 struct has_on_event<
     T, Event, Context,
-    std::void_t<decltype(std::declval<T>().on_event(std::declval<const Event&>(), std::declval<Context&>()))>>
+    std::void_t<decltype(std::declval<T>().on_event(
+        std::declval<const Event&>(), std::declval<Context&>()))>>
     : std::true_type {};
 
 template <typename T>
 constexpr std::string_view get_type_name() {
 #if defined(__clang__)
     constexpr std::string_view p = __PRETTY_FUNCTION__;
-    return p.substr(p.find("T = ") + 4, p.find_last_of(']') - (p.find("T = ") + 4));
+    return p.substr(p.find("T = ") + 4,
+                    p.find_last_of(']') - (p.find("T = ") + 4));
 #elif defined(__GNUC__)
     constexpr std::string_view p = __PRETTY_FUNCTION__;
-    return p.substr(p.find("with T = ") + 9, p.find_last_of(']') - (p.find("with T = ") + 9));
+    return p.substr(p.find("with T = ") + 9,
+                    p.find_last_of(']') - (p.find("with T = ") + 9));
 #elif defined(_MSC_VER)
     constexpr std::string_view p = __FUNCSIG__;
-    return p.substr(p.find("get_type_name<") + 14, p.find_last_of('>') - (p.find("get_type_name<") + 14));
+    return p.substr(p.find("get_type_name<") + 14,
+                    p.find_last_of('>') - (p.find("get_type_name<") + 14));
 #else
     return "Unknown";
 #endif
@@ -83,7 +88,8 @@ class IStatePathBuilder {
     // 分配内存
     virtual void* allocate_bytes(size_t size, size_t alignment) = 0;
     // 注册新构造的状态，并提供其析构函数擦除
-    virtual void push_new_state(IState<Context>* state, void (*destroy_fn)(IState<Context>*),
+    virtual void push_new_state(IState<Context>* state,
+                                void (*destroy_fn)(IState<Context>*),
                                 size_t original_offset) = 0;
     // 辅助函数：定位 new 构造状态
     template <typename T, typename... Args>
@@ -97,12 +103,16 @@ class IStatePathBuilder {
         T* instance = new (mem) T(std::forward<Args>(args)...);
 
         // 3. 把状态和【准确的回退点】一起注册进去
-        push_new_state(instance, [](IState<Context>* ptr) { static_cast<T*>(ptr)->~T(); }, rollback_mark);
+        push_new_state(
+            instance, [](IState<Context>* ptr) { static_cast<T*>(ptr)->~T(); },
+            rollback_mark);
     }
 };
 
-template <typename ParentType, typename Builder, typename ArgsTuple, std::size_t... Is>
-void call_parent_build_path(Builder& builder, const ArgsTuple& args_tuple, std::index_sequence<Is...>) {
+template <typename ParentType, typename Builder, typename ArgsTuple,
+          std::size_t... Is>
+void call_parent_build_path(Builder& builder, const ArgsTuple& args_tuple,
+                            std::index_sequence<Is...>) {
     ParentType::build_path(builder, std::get<Is>(args_tuple)...);
 }
 template <typename Context>
@@ -124,10 +134,14 @@ class StateAction {
         StateAction action{Type::TRANSITION, nullptr};
         auto args_pack = std::make_tuple(std::forward<Tuples>(tuples)...);
         using BuilderT = dk::IStatePathBuilder<Context>;
-        action.path_builder = std::function<void(BuilderT&)>([args_pack](BuilderT& builder) {
-            std::apply([&builder](auto&&... unpacked_tuples) { TargetState::build_path(builder, unpacked_tuples...); },
-                       args_pack);
-        });
+        action.path_builder =
+            std::function<void(BuilderT&)>([args_pack](BuilderT& builder) {
+                std::apply(
+                    [&builder](auto&&... unpacked_tuples) {
+                        TargetState::build_path(builder, unpacked_tuples...);
+                    },
+                    args_pack);
+            });
         return action;
     }
 
@@ -159,7 +173,8 @@ class IState {
    public:
     IState<Context>* parent_ptr = nullptr;
     virtual ~IState() = default;
-    virtual StateAction<Context> handle_event(const std::any& event, Context& ctx) = 0;
+    virtual StateAction<Context> handle_event(const std::any& event,
+                                              Context& ctx) = 0;
     virtual std::string name() const = 0;
     virtual std::string_view name_view() const = 0;
     virtual void on_enter(Context& ctx) {}
@@ -170,7 +185,8 @@ class IState {
 # 分析子类的AllowedEvents，根据状态进行分发，调用对应的on_event
 子类使用：继承IEventHandler，
 */
-template <typename BaseInterface, typename Context, typename ReturnType, typename Derived>
+template <typename BaseInterface, typename Context, typename ReturnType,
+          typename Derived>
 class IEventHandler : public BaseInterface {
    public:
     using BaseInterface::BaseInterface;
@@ -178,14 +194,16 @@ class IEventHandler : public BaseInterface {
     ReturnType handle_event(const std::any& event, Context& ctx) override {
         // 延迟推导类型，避开 CRTP 不完整类型问题
         static_assert(has_allowed_events<Derived>::value,
-                      "FATAL ERROR: Missing AllowedEvents definition in your State/Listener! Example:\n"
+                      "FATAL ERROR: Missing AllowedEvents definition in your "
+                      "State/Listener! Example:\n"
                       "    using AllowedEvents = std::tuple<EventA, EventB>;\n"
                       "If it handles NO events, explicitly write:\n"
                       "    using AllowedEvents = std::tuple<>;");
         using EventTuple = typename Derived::AllowedEvents;
         // 分支 1：如果业务期望返回 void
         if constexpr (std::is_void_v<ReturnType>) {
-            // 黑魔法：传一个空指针过去，只利用类型推导，彻底避免实例化 EventTuple 导致要求事件具有默认构造函数！
+            // 黑魔法：传一个空指针过去，只利用类型推导，彻底避免实例化
+            // EventTuple 导致要求事件具有默认构造函数！
             dispatch_void_impl(event, ctx, static_cast<EventTuple*>(nullptr));
             return;
         }
@@ -197,21 +215,26 @@ class IEventHandler : public BaseInterface {
             } else {
                 result = ReturnType{};
             }
-            dispatch_ret_impl(event, ctx, result, static_cast<EventTuple*>(nullptr));
+            dispatch_ret_impl(event, ctx, result,
+                              static_cast<EventTuple*>(nullptr));
             return result;
         }
     }
 
    private:
-    // === 新增两个 Helper 方法，专门用来解包 Tuple 里的类型 (Ts...)，避开 GCC 7 崩溃 Bug ===
+    // === 新增两个 Helper 方法，专门用来解包 Tuple 里的类型 (Ts...)，避开 GCC 7
+    // 崩溃 Bug ===
     template <typename... Ts>
-    bool dispatch_void_impl(const std::any& event, Context& ctx, std::tuple<Ts...>*) {
-        // 直接在类型包上展开，没有 auto&&，没有 decltype，极其纯粹，GCC 绝对不会崩
+    bool dispatch_void_impl(const std::any& event, Context& ctx,
+                            std::tuple<Ts...>*) {
+        // 直接在类型包上展开，没有 auto&&，没有 decltype，极其纯粹，GCC
+        // 绝对不会崩
         return (try_handle_void<Ts>(event, ctx) || ...);
     }
 
     template <typename R, typename... Ts>
-    bool dispatch_ret_impl(const std::any& event, Context& ctx, R& result, std::tuple<Ts...>*) {
+    bool dispatch_ret_impl(const std::any& event, Context& ctx, R& result,
+                           std::tuple<Ts...>*) {
         return (try_handle_ret<Ts>(event, ctx, result) || ...);
     }
 
@@ -220,7 +243,8 @@ class IEventHandler : public BaseInterface {
     bool try_handle_void(const std::any& event, Context& ctx) {
         if (const E* e = std::any_cast<E>(&event)) {
             static_assert(has_on_event<Derived, E, Context>::value,
-                          "FATAL: Declared event in AllowedEvents but missing on_event(const Event&, Context&)!");
+                          "FATAL: Declared event in AllowedEvents but missing "
+                          "on_event(const Event&, Context&)!");
             static_cast<Derived*>(this)->on_event(*e, ctx);
             return true;
         }
@@ -232,9 +256,12 @@ class IEventHandler : public BaseInterface {
     bool try_handle_ret(const std::any& event, Context& ctx, R& out_result) {
         if (const E* e = std::any_cast<E>(&event)) {
             static_assert(has_on_event<Derived, E, Context>::value,
-                          "FATAL: Declared event in AllowedEvents but missing on_event(const Event&, Context&)!");
-            using ActualRet = decltype(static_cast<Derived*>(this)->on_event(*e, ctx));
-            if constexpr (std::is_void_v<ActualRet> && std::is_same_v<R, StateAction<Context>>) {
+                          "FATAL: Declared event in AllowedEvents but missing "
+                          "on_event(const Event&, Context&)!");
+            using ActualRet =
+                decltype(static_cast<Derived*>(this)->on_event(*e, ctx));
+            if constexpr (std::is_void_v<ActualRet> &&
+                          std::is_same_v<R, StateAction<Context>>) {
                 static_cast<Derived*>(this)->on_event(*e, ctx);
                 out_result = StateAction<Context>::handled();
             } else {
@@ -262,9 +289,8 @@ public:
         return StateAction::handled();
     }
 };
-class PlayerState::Grounded : public BaseState<MyContext, Grounded, PlayerState> {
-public:
-    struct JumpEvent { float force; };
+class PlayerState::Grounded : public BaseState<MyContext, Grounded, PlayerState>
+{ public: struct JumpEvent { float force; };
     // 清晰地列出该子状态能处理的局部事件
     using AllowedEvents = std::tuple<TickEvent, JumpEvent>;
     StateAction on_event(const TickEvent& e, MyContext& ctx) {
@@ -279,7 +305,8 @@ public:
 // 自动提取模板并继承！
 */
 template <typename Context, typename Derived, typename Parent>
-class BaseState : public IEventHandler<IState<Context>, Context, StateAction<Context>, Derived>,
+class BaseState : public IEventHandler<IState<Context>, Context,
+                                       StateAction<Context>, Derived>,
                   public AutoExtractTmpl<Derived>::type {
    public:
     using ParentState = Parent;
@@ -304,22 +331,27 @@ class BaseState : public IEventHandler<IState<Context>, Context, StateAction<Con
     // 提供带参跳转能力
     template <typename TargetState, typename... Args>
     StateAction<Context> step(Args&&... args) {
-        return StateAction<Context>::template step<TargetState>(std::forward<Args>(args)...);
+        return StateAction<Context>::template step<TargetState>(
+            std::forward<Args>(args)...);
     }
 
-    template <typename P = ParentState, typename = std::enable_if_t<!std::is_same_v<P, void>>>
+    template <typename P = ParentState,
+              typename = std::enable_if_t<!std::is_same_v<P, void>>>
     P* parent() {
         return static_cast<P*>(this->parent_ptr);
     }
 
     template <typename... Tuples>
-    static void build_path(IStatePathBuilder<Context>& builder, const Tuples&... args) {
+    static void build_path(IStatePathBuilder<Context>& builder,
+                           const Tuples&... args) {
         constexpr size_t NUM_ARGS = sizeof...(Tuples);
         auto args_tuple = std::tie(args...);
         // 1. 递归构建父状态
         if constexpr (!std::is_same_v<ParentState, void>) {
             if constexpr (NUM_ARGS > 1) {
-                call_parent_build_path<ParentState>(builder, args_tuple, std::make_index_sequence<NUM_ARGS - 1>{});
+                call_parent_build_path<ParentState>(
+                    builder, args_tuple,
+                    std::make_index_sequence<NUM_ARGS - 1>{});
             } else {
                 ParentState::build_path(builder);
             }
@@ -331,8 +363,8 @@ class BaseState : public IEventHandler<IState<Context>, Context, StateAction<Con
             else
                 return std::tuple<>{};
         }();
-        // // 【修复重点】：提前在泛型 Lambda 外部提取好类型，避开 GCC 捕获推导 Bug
-        // using CurrentTupleType = decltype(current_tuple);
+        // // 【修复重点】：提前在泛型 Lambda 外部提取好类型，避开 GCC 捕获推导
+        // Bug using CurrentTupleType = decltype(current_tuple);
         // 3. 判断复用还是构造
         std::string_view my_name = Derived::static_name();
         if (builder.try_reuse(my_name)) {
@@ -341,16 +373,23 @@ class BaseState : public IEventHandler<IState<Context>, Context, StateAction<Con
             // 【未命中缓存】：直接利用 builder 在内存池上分配并构造
             std::apply(
                 [&](auto&&... unpacked_args) {
-                    if constexpr (std::is_constructible_v<Derived, decltype(unpacked_args)...>) {
-                        builder.template emplace<Derived>(std::forward<decltype(unpacked_args)>(unpacked_args)...);
+                    if constexpr (std::is_constructible_v<
+                                      Derived, decltype(unpacked_args)...>) {
+                        builder.template emplace<Derived>(
+                            std::forward<decltype(unpacked_args)>(
+                                unpacked_args)...);
                     } else {
                         // 使用外部提前定义好的 CurrentTupleType
                         // meta_utils::print_type<CurrentTupleType>();
 
-                        // 或者更精准一点，打印出 unpacked_args 到底被推导成了什么类型组合：
-                        meta_utils::print_type<std::tuple<decltype(unpacked_args)...>>();
+                        // 或者更精准一点，打印出 unpacked_args
+                        // 到底被推导成了什么类型组合：
+                        meta_utils::print_type<
+                            std::tuple<decltype(unpacked_args)...>>();
 
-                        throw std::logic_error("FATAL: Cannot construct state '" + std::string(my_name) + "'.");
+                        throw std::logic_error(
+                            "FATAL: Cannot construct state '" +
+                            std::string(my_name) + "'.");
                     }
                 },
                 current_tuple);

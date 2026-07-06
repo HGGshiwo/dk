@@ -26,30 +26,34 @@ class UdpAdapter : public BaseAdapter<Context, DerivedEngine> {
 
     std::function<RouteId(const std::vector<uint8_t>&)> router_;
 
-    using ContextHandler =
-        std::function<void(const std::vector<uint8_t>&, decltype(std::declval<DerivedEngine>().get_context()))>;
+    using ContextHandler = std::function<void(
+        const std::vector<uint8_t>&,
+        decltype(std::declval<DerivedEngine>().get_context()))>;
     std::map<RouteId, ContextHandler> context_routes_;
 
     using EventHandler = std::function<void(const std::vector<uint8_t>&)>;
     std::map<RouteId, EventHandler> event_routes_;
 
     void do_receive() {
-        socket_.async_receive_from(net::buffer(recv_buffer_), sender_endpoint_,
-                                   [this](boost::system::error_code ec, std::size_t bytes_recvd) {
-                                       if (!ec && bytes_recvd > 0) {
-                                           handle_packet(bytes_recvd);
-                                       } else if (ec && ec != net::error::operation_aborted) {
-                                           spdlog::error("[UdpAdapter Error] Receive failed: {}", ec.message());
-                                       }
+        socket_.async_receive_from(
+            net::buffer(recv_buffer_), sender_endpoint_,
+            [this](boost::system::error_code ec, std::size_t bytes_recvd) {
+                if (!ec && bytes_recvd > 0) {
+                    handle_packet(bytes_recvd);
+                } else if (ec && ec != net::error::operation_aborted) {
+                    spdlog::error("[UdpAdapter Error] Receive failed: {}",
+                                  ec.message());
+                }
 
-                                       if (socket_.is_open()) {
-                                           do_receive();
-                                       }
-                                   });
+                if (socket_.is_open()) {
+                    do_receive();
+                }
+            });
     }
 
     void handle_packet(std::size_t bytes_recvd) {
-        std::vector<uint8_t> packet_data(recv_buffer_.begin(), recv_buffer_.begin() + bytes_recvd);
+        std::vector<uint8_t> packet_data(recv_buffer_.begin(),
+                                         recv_buffer_.begin() + bytes_recvd);
 
         RouteId id = router_(packet_data);
 
@@ -82,32 +86,38 @@ class UdpAdapter : public BaseAdapter<Context, DerivedEngine> {
 
         socket_.set_option(net::socket_base::reuse_address(true), ec);
         if (ec) {
-            std::string err = "UDP Socket set reuse_address error: " + ec.message();
+            std::string err =
+                "UDP Socket set reuse_address error: " + ec.message();
             spdlog::error("[UdpAdapter Error] {}", err);
             throw std::runtime_error(err);
         }
 
         socket_.bind({udp::v4(), port}, ec);
         if (ec) {
-            std::string err = "Bind UDP port " + std::to_string(port) + " failed: " + ec.message();
+            std::string err = "Bind UDP port " + std::to_string(port) +
+                              " failed: " + ec.message();
             spdlog::error("[UdpAdapter Error] {}", err);
             throw std::runtime_error(err);
         }
 
-        spdlog::info("[UdpAdapter Info] Successfully listening on UDP port {}", port);
+        spdlog::info("[UdpAdapter Info] Successfully listening on UDP port {}",
+                     port);
         do_receive();
     }
 
     template <typename F>
     void bind_context(const RouteId& id, F&& cb) {
-        context_routes_[id] = [cb = std::forward<F>(cb)](const std::vector<uint8_t>& data, auto& ctx) {
+        context_routes_[id] = [cb = std::forward<F>(cb)](
+                                  const std::vector<uint8_t>& data, auto& ctx) {
             cb(data, ctx);
         };
     }
 
     template <typename Callable>
     void bind_event(const RouteId& id, Callable&& translator) {
-        event_routes_[id] = [this, translator = std::forward<Callable>(translator)](const std::vector<uint8_t>& data) {
+        event_routes_[id] = [this,
+                             translator = std::forward<Callable>(translator)](
+                                const std::vector<uint8_t>& data) {
             auto event = translator(data);
             this->engine_->dispatch(event);
         };

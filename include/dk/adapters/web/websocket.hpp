@@ -44,7 +44,9 @@ class WsSessionImpl : public WsConnection {
 
    public:
     WsSessionImpl(tcp::socket&& socket, WsEndpoint endpoint)
-        : ws_(std::move(socket)), endpoint_(std::move(endpoint)), id_(++id_counter_) {}
+        : ws_(std::move(socket)),
+          endpoint_(std::move(endpoint)),
+          id_(++id_counter_) {}
 
     std::shared_ptr<WsSessionImpl> derived_from_this() {
         return std::static_pointer_cast<WsSessionImpl>(shared_from_this());
@@ -55,7 +57,8 @@ class WsSessionImpl : public WsConnection {
     template <class Body, class Allocator>
     void accept(http::request<Body, http::basic_fields<Allocator>> req) {
         auto self = derived_from_this();
-        ws_.set_option(websocket::stream_base::timeout::suggested(beast::role_type::server));
+        ws_.set_option(websocket::stream_base::timeout::suggested(
+            beast::role_type::server));
         ws_.async_accept(req, [self](beast::error_code ec) {
             if (!ec) {
                 if (self->endpoint_.on_open) {
@@ -79,7 +82,9 @@ class WsSessionImpl : public WsConnection {
     void close() override {
         auto self = derived_from_this();
         net::post(ws_.get_executor(), [self]() {
-            self->ws_.async_close(websocket::close_reason(websocket::close_code::normal), [self](beast::error_code) {});
+            self->ws_.async_close(
+                websocket::close_reason(websocket::close_code::normal),
+                [self](beast::error_code) {});
         });
     }
 
@@ -94,15 +99,17 @@ class WsSessionImpl : public WsConnection {
         do_send_and_wait(current_id, msg_json, 0);
     }
 
-    void send_state(const std::string& state_key, nlohmann::json msg_json) override {
+    void send_state(const std::string& state_key,
+                    nlohmann::json msg_json) override {
         std::lock_guard<std::mutex> lock(pending_mutex_);
 
         // Always store the latest data for this key
         latest_states_[state_key] = msg_json;
         auto it = pending_states_.find(state_key);
         if (it != pending_states_.end()) {
-            // State is already waiting for ACK. Update payload and send immediately.
-            // We keep the same msg_id and timer, so it acts like a transparent update.
+            // State is already waiting for ACK. Update payload and send
+            // immediately. We keep the same msg_id and timer, so it acts like a
+            // transparent update.
             uint64_t msg_id = it->second.current_msg_id;
             msg_json["msg_id"] = msg_id;
             // msg_json["state_key"] = state_key;
@@ -114,7 +121,8 @@ class WsSessionImpl : public WsConnection {
             msg_json["msg_id"] = current_id;
             // msg_json["state_key"] = state_key;
             send(msg_json);
-            auto timer = std::make_shared<boost::asio::steady_timer>(ws_.get_executor());
+            auto timer =
+                std::make_shared<boost::asio::steady_timer>(ws_.get_executor());
             timer->expires_after(std::chrono::milliseconds(1000));
             pending_states_[state_key] = {current_id, timer, 0};
             do_state_wait(state_key, current_id, timer, 0);
@@ -138,7 +146,8 @@ class WsSessionImpl : public WsConnection {
             auto state_it = pending_states_.find(state_key);
 
             // If the ACK matches the active msg_id for this state
-            if (state_it != pending_states_.end() && state_it->second.current_msg_id == ack_id) {
+            if (state_it != pending_states_.end() &&
+                state_it->second.current_msg_id == ack_id) {
                 boost::system::error_code ec;
                 state_it->second.timer->cancel(ec);
                 pending_states_.erase(state_it);
@@ -149,7 +158,8 @@ class WsSessionImpl : public WsConnection {
 
    private:
     // Core function to send and start timeout timer
-    void do_send_and_wait(uint64_t msg_id, const json& payload, int retry_count) {
+    void do_send_and_wait(uint64_t msg_id, const json& payload,
+                          int retry_count) {
         // Max 3 retries, then give up (you can adjust this)
         if (retry_count > MAX_RETRY_TIME) {
             std::lock_guard<std::mutex> lock(pending_mutex_);
@@ -159,17 +169,22 @@ class WsSessionImpl : public WsConnection {
         // 1. Actually send the message via WebSocket
         send(payload);
         // 2. Create timer for this message
-        auto timer = std::make_shared<boost::asio::steady_timer>(ws_.get_executor());
-        timer->expires_after(std::chrono::milliseconds(1000));  // 1 second timeout
+        auto timer =
+            std::make_shared<boost::asio::steady_timer>(ws_.get_executor());
+        timer->expires_after(
+            std::chrono::milliseconds(1000));  // 1 second timeout
         // 3. Store in pending map safely
         {
             std::lock_guard<std::mutex> lock(pending_mutex_);
             pending_msgs_[msg_id] = {payload, timer, retry_count};
         }
         // 4. Start async wait
-        // Use weak_ptr to avoid capturing a deleted session if client disconnects
-        std::weak_ptr<WsSessionImpl> weak_self = std::static_pointer_cast<WsSessionImpl>(shared_from_this());
-        timer->async_wait([weak_self, msg_id, payload, retry_count](boost::system::error_code ec) {
+        // Use weak_ptr to avoid capturing a deleted session if client
+        // disconnects
+        std::weak_ptr<WsSessionImpl> weak_self =
+            std::static_pointer_cast<WsSessionImpl>(shared_from_this());
+        timer->async_wait([weak_self, msg_id, payload,
+                           retry_count](boost::system::error_code ec) {
             if (ec) return;  // Timer cancelled or error
             if (auto self = weak_self.lock()) {
                 // Check if message is still pending (not acked yet)
@@ -189,17 +204,21 @@ class WsSessionImpl : public WsConnection {
         });
     }
 
-    void do_state_wait(std::string state_key, uint64_t msg_id, std::shared_ptr<boost::asio::steady_timer> timer,
+    void do_state_wait(std::string state_key, uint64_t msg_id,
+                       std::shared_ptr<boost::asio::steady_timer> timer,
                        int retry_count) {
         std::weak_ptr<WsSessionImpl> weak_self = derived_from_this();
-        timer->async_wait([weak_self, state_key, msg_id, retry_count](boost::system::error_code ec) {
+        timer->async_wait([weak_self, state_key, msg_id,
+                           retry_count](boost::system::error_code ec) {
             if (ec) return;
             if (auto self = weak_self.lock()) {
                 std::lock_guard<std::mutex> lock(self->pending_mutex_);
                 auto it = self->pending_states_.find(state_key);
 
-                // Ensure this state is still active and hasn't been replaced by a new lifecycle
-                if (it != self->pending_states_.end() && it->second.current_msg_id == msg_id) {
+                // Ensure this state is still active and hasn't been replaced by
+                // a new lifecycle
+                if (it != self->pending_states_.end() &&
+                    it->second.current_msg_id == msg_id) {
                     if (retry_count >= 3) {
                         self->pending_states_.erase(it);
                         self->state_ack_map_.erase(msg_id);
@@ -212,12 +231,15 @@ class WsSessionImpl : public WsConnection {
 
                     self->send(latest_msg);
                     // Setup next retry timer
-                    auto new_timer = std::make_shared<boost::asio::steady_timer>(self->ws_.get_executor());
+                    auto new_timer =
+                        std::make_shared<boost::asio::steady_timer>(
+                            self->ws_.get_executor());
                     new_timer->expires_after(std::chrono::milliseconds(1000));
                     it->second.timer = new_timer;
                     it->second.retry_count = retry_count + 1;
 
-                    self->do_state_wait(state_key, msg_id, new_timer, retry_count + 1);
+                    self->do_state_wait(state_key, msg_id, new_timer,
+                                        retry_count + 1);
                 }
             }
         });
@@ -225,7 +247,8 @@ class WsSessionImpl : public WsConnection {
 
     void do_read() {
         auto self = derived_from_this();
-        ws_.async_read(buffer_, [self](beast::error_code ec, std::size_t bytes_transferred) {
+        ws_.async_read(buffer_, [self](beast::error_code ec,
+                                       std::size_t bytes_transferred) {
             if (ec == websocket::error::closed || ec) {
                 if (self->endpoint_.on_close) {
                     self->endpoint_.on_close(self);
@@ -250,14 +273,15 @@ class WsSessionImpl : public WsConnection {
         is_writing_ = true;
         auto self = derived_from_this();
         ws_.text(true);
-        ws_.async_write(net::buffer(write_queue_.front()), [self](beast::error_code ec, std::size_t) {
-            if (!ec) {
-                self->write_queue_.pop_front();
-                self->do_write();
-            } else {
-                self->is_writing_ = false;
-            }
-        });
+        ws_.async_write(net::buffer(write_queue_.front()),
+                        [self](beast::error_code ec, std::size_t) {
+                            if (!ec) {
+                                self->write_queue_.pop_front();
+                                self->do_write();
+                            } else {
+                                self->is_writing_ = false;
+                            }
+                        });
     }
 };
 }  // namespace dk

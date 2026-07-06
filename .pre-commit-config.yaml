@@ -4,6 +4,7 @@ repos:
     rev: 24.2.0  # 强制指定版本号，不要用 master
     hooks:
       - id: black
+        args: [--target-version, py38]
       
   - repo: https://github.com/PyCQA/isort
     rev: 5.13.2

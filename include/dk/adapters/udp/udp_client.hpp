@@ -82,13 +82,15 @@ class UdpClient {
     // 2. 发送 std::string (便捷扩展)
     ssize_t send(const std::string& data) {
         if (data.empty()) return 0;
-        return send_raw(reinterpret_cast<const uint8_t*>(data.data()), data.size());
+        return send_raw(reinterpret_cast<const uint8_t*>(data.data()),
+                        data.size());
     }
 
     // 3. 发送原生指针数据 (底层调用)
     ssize_t send_raw(const uint8_t* data, size_t size) {
-        ssize_t sent_bytes = sendto(sockfd_, reinterpret_cast<const char*>(data), size, 0,
-                                    (const struct sockaddr*)&dest_addr_, sizeof(dest_addr_));
+        ssize_t sent_bytes =
+            sendto(sockfd_, reinterpret_cast<const char*>(data), size, 0,
+                   (const struct sockaddr*)&dest_addr_, sizeof(dest_addr_));
         return sent_bytes;  // 返回实际发送的字节数，失败返回 -1 (SOCKET_ERROR)
     }
 

@@ -16,7 +16,9 @@ using namespace dk;
 class DkFutureTest : public ::testing::Test {
    protected:
     boost::asio::io_context ioc_;
-    std::unique_ptr<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>> work_guard_;
+    std::unique_ptr<boost::asio::executor_work_guard<
+        boost::asio::io_context::executor_type>>
+        work_guard_;
     std::thread worker_thread_;
     std::unique_ptr<IAsyncRuntime> runtime_;
 
@@ -30,14 +32,18 @@ class DkFutureTest : public ::testing::Test {
 
         std::thread::id get_thread_id() override { return thread_id; }
 
-        void post_future_task(std::function<void()> task) override { boost::asio::post(ioc_, std::move(task)); }
+        void post_future_task(std::function<void()> task) override {
+            boost::asio::post(ioc_, std::move(task));
+        }
 
-        std::function<void()> set_future_timeout(uint32_t ms, std::function<void()> on_timeout) override {
+        std::function<void()> set_future_timeout(
+            uint32_t ms, std::function<void()> on_timeout) override {
             auto timer = std::make_shared<boost::asio::steady_timer>(ioc_);
             timer->expires_after(std::chrono::milliseconds(ms));
-            timer->async_wait([on_timeout, timer](const boost::system::error_code& ec) {
-                if (!ec) on_timeout();
-            });
+            timer->async_wait(
+                [on_timeout, timer](const boost::system::error_code& ec) {
+                    if (!ec) on_timeout();
+                });
             return [timer]() { timer->cancel(); };
         }
     };
@@ -46,7 +52,8 @@ class DkFutureTest : public ::testing::Test {
         // 1. 初始化 Runtime
         runtime_ = std::make_unique<AsioRuntime>(ioc_);
         // 2. 保证 io_context 不会因为没任务而立刻退出
-        work_guard_ = std::make_unique<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>(
+        work_guard_ = std::make_unique<boost::asio::executor_work_guard<
+            boost::asio::io_context::executor_type>>(
             boost::asio::make_work_guard(ioc_));
         // 3. 启动后台事件循环
         worker_thread_ = std::thread([this]() { ioc_.run(); });
@@ -74,7 +81,9 @@ TEST_F(DkFutureTest, BasicChain) {
 
     Promise<int>::resolve(runtime_.get(), 10)
         .then([](int val) { return val * 2; })
-        .then([](int val) { return std::string("Result: ") + std::to_string(val); })
+        .then([](int val) {
+            return std::string("Result: ") + std::to_string(val);
+        })
         .then([&](std::string str) {
             final_result = str;     // 记录结果
             test_done.set_value();  // 唤醒主线程
@@ -82,7 +91,8 @@ TEST_F(DkFutureTest, BasicChain) {
         });
 
     // 阻塞等待异步链条执行完毕（设置 1 秒超时防死锁）
-    ASSERT_EQ(test_done.get_future().wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    ASSERT_EQ(test_done.get_future().wait_for(std::chrono::seconds(1)),
+              std::future_status::ready);
 
     // GTest 断言
     EXPECT_EQ(final_result, "Result: 20");
@@ -114,7 +124,8 @@ TEST_F(DkFutureTest, FutureFlattening) {
             return true;
         });
 
-    ASSERT_EQ(test_done.get_future().wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    ASSERT_EQ(test_done.get_future().wait_for(std::chrono::seconds(1)),
+              std::future_status::ready);
     EXPECT_EQ(final_result, "Flatten Magic!");
 }
 
@@ -147,11 +158,13 @@ TEST_F(DkFutureTest, Cancellation) {
             test_done.set_value();
         });
 
-    ASSERT_EQ(test_done.get_future().wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    ASSERT_EQ(test_done.get_future().wait_for(std::chrono::seconds(1)),
+              std::future_status::ready);
 
     // GTest 断言
     EXPECT_FALSE(step1_executed) << "任务已经被取消，不应该执行 then 的回调！";
-    EXPECT_TRUE(error_caught) << "必须在 catch_error 中捕获到 CancelledException！";
+    EXPECT_TRUE(error_caught)
+        << "必须在 catch_error 中捕获到 CancelledException！";
 }
 
 // ============================================================================
@@ -185,7 +198,8 @@ TEST_F(DkFutureTest, TimeoutInterceptor) {
     });
 
     // 留出足够的时间让超时触发
-    ASSERT_EQ(test_done.get_future().wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    ASSERT_EQ(test_done.get_future().wait_for(std::chrono::seconds(1)),
+              std::future_status::ready);
 
     EXPECT_TRUE(error_caught) << "必须捕获到 TimeoutException！";
     if (t.joinable()) t.join();
@@ -209,7 +223,9 @@ TEST_F(DkFutureTest, TimeoutCancelledOnSuccess) {
             test_done.set_value();
             return val;
         })
-        .catch_error([&](std::exception_ptr e) { ADD_FAILURE() << "任务已经成功完成，不应该触发 catch！"; });
+        .catch_error([&](std::exception_ptr e) {
+            ADD_FAILURE() << "任务已经成功完成，不应该触发 catch！";
+        });
 
     // 后台瞬间完成 (10ms)，不应该触发 500ms 的超时
     auto t = std::thread([p]() {
@@ -217,7 +233,8 @@ TEST_F(DkFutureTest, TimeoutCancelledOnSuccess) {
         p->resolve(99);
     });
 
-    ASSERT_EQ(test_done.get_future().wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    ASSERT_EQ(test_done.get_future().wait_for(std::chrono::seconds(1)),
+              std::future_status::ready);
 
     EXPECT_TRUE(success_executed);
     if (t.joinable()) t.join();

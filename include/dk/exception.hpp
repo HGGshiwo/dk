@@ -13,13 +13,16 @@
 
 namespace dk {
 // 1. 定义 Boost 异常携带属性的 Tag
-using stacktrace_tag = boost::error_info<struct tag_stacktrace, boost::stacktrace::stacktrace>;
+using stacktrace_tag =
+    boost::error_info<struct tag_stacktrace, boost::stacktrace::stacktrace>;
 
 // 2. 定义我们的优雅异常基类
-class TraceableException : public virtual std::runtime_error, public virtual boost::exception {
+class TraceableException : public virtual std::runtime_error,
+                           public virtual boost::exception {
    public:
     // 构造函数：接收错误信息，并【自动】捕获当前调用栈
-    explicit TraceableException(const std::string& msg) : std::runtime_error(msg) {
+    explicit TraceableException(const std::string& msg)
+        : std::runtime_error(msg) {
         // 将当前的调用栈附加到 Boost 异常对象中
         *this << stacktrace_tag(boost::stacktrace::stacktrace());
     }
@@ -32,7 +35,8 @@ class TraceableException : public virtual std::runtime_error, public virtual boo
         oss << "Exception: " << this->what() << "\n";
 
         // 提取并格式化调用栈
-        const boost::stacktrace::stacktrace* st = boost::get_error_info<stacktrace_tag>(*this);
+        const boost::stacktrace::stacktrace* st =
+            boost::get_error_info<stacktrace_tag>(*this);
         if (st) {
             oss << "Traceback (most recent call last):\n" << *st;
         } else {
