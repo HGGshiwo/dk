@@ -491,19 +491,41 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
     template <typename ReturnType,
               std::enable_if_t<!std::is_same<ReturnType, void>::value, int> = 0>
     Future<ReturnType> post_background_task(std::function<ReturnType()> task) {
-        std::shared_ptr<IEngine> self_ptr(this, [](IEngine*) {});
-        std::shared_ptr<Promise<ReturnType>> promise =
-            std::make_shared<Promise<ReturnType>>(self_ptr);
-        boost::asio::post(
-            *this->workflow_pool_.value(), [task, engine = this, promise]() {
-                // Execute background task
+        // 1. 直接构造 Dispatcher，通过捕获 this 指针派发
+        // （前提是 Engine 实例的生命周期始终大于网络请求，通常都是如此）
+        auto dispatcher = [engine = this](std::function<void()> cb) {
+            engine->post_future_task(std::move(cb));
+        };
+
+        auto timeout_scheduler =
+            [engine = this](uint32_t ms, std::function<void()> on_timeout) {
+                return engine->set_future_timeout(ms, std::move(on_timeout));
+            };
+
+        // 2. 绕开伪 shared_ptr，直接注入调度器
+        auto promise = std::make_shared<Promise<ReturnType>>(
+            std::move(dispatcher), std::move(timeout_scheduler));
+
+        // 3. 将任务放入工作线程池，并加上全面的异常保护
+        boost::asio::post(*this->workflow_pool_.value(), [task, engine = this,
+                                                          promise]() {
+            try {
+                // 强制同步执行实际的后台逻辑 (比如 HTTP 请求)
                 ReturnType data = task();
-                // Return result safely to main io_context
+
+                // 成功后，将结果切回主事件循环
                 boost::asio::post(engine->io_context_,
                                   [data = std::move(data), promise]() mutable {
                                       promise->resolve(std::move(data));
                                   });
-            });
+            } catch (...) {
+                // 如果遭遇未知崩溃，将异常抛给 Catch_error 流
+                std::exception_ptr e = std::current_exception();
+                boost::asio::post(engine->io_context_,
+                                  [e, promise]() { promise->reject(e); });
+            }
+        });
+
         return promise->get_future();
     }
 
