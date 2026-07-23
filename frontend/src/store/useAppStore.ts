@@ -23,6 +23,7 @@ interface AppState {
   modalFormData: Record<string, unknown>;
   config: GlobalConfig | null;
   isLoading: boolean;
+  lastMessageTime: number;
 
   setModalVisible: (visible: boolean, key?: string) => void;
   updateModalFormData: (data: Record<string, unknown> | object) => void;
@@ -74,6 +75,7 @@ const initWebSocket = () => {
     };
 
     ws.onmessage = (event) => {
+      useAppStore.setState({ lastMessageTime: Date.now() });
       try {
         const data = JSON.parse(event.data);
         if (!data.type) return;
@@ -129,6 +131,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   config: null,
   isLoading: true,
   logboxVisible: false,
+  lastMessageTime: 0,
 
   setLogboxVisible: (visible) => set({ logboxVisible: visible }),
 
