@@ -36,6 +36,97 @@ interface AppState {
 let wsInstance: WebSocket | null = null;
 let reconnectTimer: number | null = null;
 let isManualClose = false;
+const wsListeners: ((data: any) => void)[] = [];
+let fglogBuffer: any[] = [];
+
+export const getFglogBuffer = () => {
+  return fglogBuffer;
+};
+
+export const fglogHandlerRef: { current: ((data: any) => void) | null } = { current: null };
+
+// 2. 导出设置和移除的方法
+export const setFglogHandler = (listener: (data: any) => void) => {
+  fglogHandlerRef.current = listener;
+  console.log("set fglogger");
+};
+
+export const removeFglogHandler = () => {
+  fglogHandlerRef.current = null;
+  console.log("remove fglogger");
+};
+
+
+export const addWsListener = (listener: (data: any) => void) => {
+  wsListeners.push(listener);
+};
+
+export const removeWsListener = (listener: (data: any) => void) => {
+  const index = wsListeners.indexOf(listener);
+  if (index !== -1) {
+    wsListeners.splice(index, 1);
+  }
+};
+
+export const clearLocalStorageHistory = () => {
+  fglogBuffer = [];
+  try {
+    const countStr = localStorage.getItem("fglog_chunk_count");
+    if (countStr) {
+      const count = parseInt(countStr, 10);
+      for (let i = 0; i < count; i++) {
+        localStorage.removeItem(`fglog_chunk_${i}`);
+      }
+    }
+    localStorage.setItem("fglog_chunk_count", "0");
+  } catch (e) {
+    console.error("Failed to clear localStorage history:", e);
+  }
+};
+
+const handleFglog = (data: any) => {
+  if (data.type != "fglog") return false;
+  const fglog = data.fglog;
+  if (!fglog) return false;
+
+  const { time, topic, value } = fglog;
+  if (time !== undefined && topic !== undefined && value !== undefined) {
+    const dataPoint: any = { time };
+    if (Array.isArray(value)) {
+      if (value.length >= 3) {
+        dataPoint[topic + ".x"] = value[0];
+        dataPoint[topic + ".y"] = value[1];
+        dataPoint[topic + ".z"] = value[2];
+      } else if (value.length === 2) {
+        dataPoint[topic + ".x"] = value[0];
+        dataPoint[topic + ".y"] = value[1];
+      }
+    } else {
+      if (topic.includes("log") || topic.endsWith("log_events") || topic.endsWith("/log")) {
+        dataPoint.log = value;
+      } else {
+        dataPoint[topic] = value;
+      }
+    }
+
+    fglogBuffer.push(dataPoint);
+
+    if (fglogBuffer.length >= 2000) {
+      const chunk = fglogBuffer.slice(0, 1000);
+      fglogBuffer = fglogBuffer.slice(1000);
+      try {
+        const countStr = localStorage.getItem("fglog_chunk_count") || "0";
+        const count = parseInt(countStr, 10);
+        localStorage.setItem(`fglog_chunk_${count}`, JSON.stringify(chunk));
+        localStorage.setItem("fglog_chunk_count", (count + 1).toString());
+      } catch (e) {
+        console.error("Failed to write chunk to localStorage:", e);
+      }
+    }
+  }
+  fglogHandlerRef.current?.(fglog);
+  return true;
+}
 
 const initWebSocket = () => {
   if (wsInstance) {
@@ -52,9 +143,15 @@ const initWebSocket = () => {
     ws.onopen = () => {
       console.log("WebSocket连接成功");
       useAppStore.setState({ wsStatus: "open" });
+      clearLocalStorageHistory();
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
+      }
+      try {
+        ws.send(JSON.stringify({ fglog_enable: true }));
+      } catch (err) {
+        console.error("发送 fglog_enable 指令失败", err);
       }
     };
 
@@ -78,6 +175,18 @@ const initWebSocket = () => {
       useAppStore.setState({ lastMessageTime: Date.now() });
       try {
         const data = JSON.parse(event.data);
+        if (handleFglog(data)) {
+          return;
+        }
+
+        wsListeners.forEach((listener) => {
+          try {
+            listener(data);
+          } catch (e) {
+            console.error("WS listener error:", e);
+          }
+        });
+
         if (!data.type) return;
 
         const dataType = data.type;
@@ -166,7 +275,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           },
           {} as Record<string, string>,
         );
-        
+
         // 初始化 state_bool 的默认值
         if (config?.state_bool) {
           const stateBoolEntries = sortByOrder(config.state_bool);
@@ -174,7 +283,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             initStateData[item.key] = item.default;
           });
         }
-        
+
         // 初始化 state_value 的默认值
         if (config?.state_value) {
           const stateValueEntries = sortByOrder(config.state_value);
@@ -182,7 +291,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             initStateData[item.key] = item.default;
           });
         }
-        
+
         set({ stateData: initStateData });
       }
 
@@ -204,4 +313,16 @@ export const cleanupWebSocket = () => {
     wsInstance.close();
     wsInstance = null;
   }
+};
+
+export const sendWebSocketMessage = (message: any) => {
+  if (wsInstance && wsInstance.readyState === WebSocket.OPEN) {
+    try {
+      wsInstance.send(typeof message === "string" ? message : JSON.stringify(message));
+      return true;
+    } catch (err) {
+      console.error("发送WS消息失败", err);
+    }
+  }
+  return false;
 };

@@ -99,17 +99,32 @@ class ConnectionManager {
                      connections_.size());
     }
 
+    inline static std::function<void(size_t)> on_conn_removed;
+
     void remove(std::shared_ptr<WsConnection> conn) {
         std::lock_guard<std::mutex> lock(mutex_);
         connections_.erase(conn->get_id());
         spdlog::info("[ConnectionManager] Client disconnected. Total: {}",
                      connections_.size());
+        if (on_conn_removed) {
+            on_conn_removed(conn->get_id());
+        }
     }
 
     void publish(const nlohmann::json& msg_json) {
         std::lock_guard<std::mutex> lock(mutex_);
         for (auto& [id, conn] : connections_) {
             conn->send(msg_json);
+        }
+    }
+
+    void publish_fglog(const nlohmann::json& msg_json,
+                       const std::function<bool(size_t)>& filter) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto& [id, conn] : connections_) {
+            if (filter(id)) {
+                conn->send(msg_json);
+            }
         }
     }
 

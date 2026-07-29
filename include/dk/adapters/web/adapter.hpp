@@ -45,6 +45,11 @@ class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
     net::io_context& ioc_;
     tcp::acceptor acceptor_;
 
+    // 并发连接数控制与退避定时器
+    std::atomic<int> active_http_connections_{0};
+    int max_http_connections_ = 1000;       // 最大允许连接数
+    net::steady_timer accept_timer_{ioc_};  // 用于发生 EMFILE 时的退避延迟
+
     std::shared_ptr<ConnectionManager> conn_manager_;
     // 路由表：{HTTP方法, 路径} -> IProtocolHandler 接口
     std::map<std::pair<boost::beast::http::verb, std::string>,
@@ -275,9 +280,10 @@ class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
                     conn->handle_ack(acked_id);
                     return;  // If it's pure ACK, we can stop processing here
                 }
+            } catch (const std::exception& ex) {
+                spdlog::error("[Websocket] Receive Error: {}", ex.what());
             } catch (...) {
-                // Not a JSON or parse error, just ignore and pass to business
-                // logic
+                spdlog::error("[Websocket] Unknown Receive Error");
             }
 
             // Dispatch to business logic
@@ -385,28 +391,49 @@ class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
 
    private:
     void do_accept() {
-        acceptor_.async_accept(
-            net::make_strand(ioc_),
-            [this](beast::error_code ec, tcp::socket socket) {
-                if (!ec) {
+        acceptor_.async_accept(net::make_strand(ioc_), [this](
+                                                           beast::error_code ec,
+                                                           tcp::socket socket) {
+            if (!ec) {
+                // 【防线3：最大连接数保护】
+                if (active_http_connections_.load() >= max_http_connections_) {
+                    spdlog::warn(
+                        "[WebAdapter] Max connections ({}) reached, dropping "
+                        "new client.",
+                        max_http_connections_);
+                    beast::error_code ignored_ec;
+                    socket.close(ignored_ec);  // 超过上限直接丢弃，不分配资源
+                } else {
+                    // 正常接入
                     std::make_shared<HttpSession<WebAdapter>>(std::move(socket),
                                                               this)
                         ->start();
-                } else {
-                    // 增加运行时的 accept 错误提示
-                    spdlog::error("[WebAdapter Error] async_accept failed: {}",
-                                  ec.message());
-
-                    // 如果是致命错误（比如 acceptor 被关闭），应该停止 accept
-                    // 循环
-                    if (ec == net::error::operation_aborted ||
-                        ec == net::error::bad_descriptor) {
-                        return;
-                    }
                 }
-                // 只要不是致命错误，继续接收下一个连接
+                do_accept();  // 继续接收下一个
+            } else {
+                spdlog::error("[WebAdapter Error] async_accept failed: {}",
+                              ec.message());
+
+                // 【防线0：防止 Acceptor 死亡自旋 (CPU 100%)】
+                // 如果错误是“文件描述符耗尽”，千万不能立刻再次 do_accept()
+                if (ec == net::error::no_descriptors ||
+                    ec == net::error::no_buffer_space) {
+                    spdlog::error(
+                        "[WebAdapter] FD exhausted! Backing off for 500ms.");
+                    accept_timer_.expires_after(std::chrono::milliseconds(500));
+                    accept_timer_.async_wait([this](beast::error_code) {
+                        do_accept();  // 等待 500 毫秒后系统缓过来了，再继续接收
+                    });
+                    return;  // 必须 return，打断死循环
+                }
+
+                if (ec == net::error::operation_aborted ||
+                    ec == net::error::bad_descriptor) {
+                    return;  // 致命错误，退出
+                }
                 do_accept();
-            });
+            }
+        });
     }
     friend class HttpSession<WebAdapter>;
 };
@@ -424,12 +451,23 @@ class HttpSession
     AdapterType* adapter_;
     bool socket_released_ = false;
 
+    // 针对恶意/僵尸连接的超时定时器
+    net::steady_timer timeout_timer_;
+
     // 专用于发送 file_body 的响应指针，保持发送期间生命周期存活
     std::shared_ptr<http::response<http::file_body>> file_res_;
 
    public:
     HttpSession(tcp::socket socket, AdapterType* adapter)
-        : socket_(std::move(socket)), adapter_(adapter) {}
+        : socket_(std::move(socket)),
+          adapter_(adapter),
+          timeout_timer_(socket_.get_executor()) {
+        adapter_->active_http_connections_++;  // 新连接建立，计数 +1
+    }
+
+    ~HttpSession() {
+        adapter_->active_http_connections_--;  // 连接释放，计数 -1
+    }
 
     void start() { read_request(); }
 
@@ -468,8 +506,10 @@ class HttpSession
     }
 
     // 提供给 WS/SSE Handler 接管底层 Socket 的接口
+    // 释放 socket 时，必须取消定时器，防止误杀已经升级成 WebSocket 的连接
     tcp::socket release_socket() {
         socket_released_ = true;
+        timeout_timer_.cancel();
         return std::move(socket_);
     }
 
@@ -558,11 +598,40 @@ class HttpSession
    private:
     void read_request() {
         if (socket_released_) return;
+
+        // 【防线1：应用层发呆超时机制 (10秒)】
+        // 任何连接只要连上，10秒内必须发出合法的 HTTP 请求，否则直接断开
+        timeout_timer_.expires_after(std::chrono::seconds(10));
         auto self = this->shared_from_this();
-        http::async_read(socket_, buffer_, req_,
-                         [self](beast::error_code ec, std::size_t) {
-                             if (!ec) self->process_request();
-                         });
+        timeout_timer_.async_wait([self](beast::error_code ec) {
+            // 如果定时器没有被取消 (说明没收到数据)，且 socket 没被释放给 WS
+            if (!ec && !self->socket_released_) {
+                spdlog::warn(
+                    "[HttpSession] Client timeout (10s), forcefully closing "
+                    "connection.");
+                beast::error_code ignored_ec;
+                self->socket_.close(ignored_ec);  // 主动掐断连接！
+            }
+        });
+
+        http::async_read(
+            socket_, buffer_, req_, [self](beast::error_code ec, std::size_t) {
+                // 【关键】不管成功还是失败，只要有响应，就取消定时器
+                self->timeout_timer_.cancel();
+
+                if (!ec) {
+                    self->process_request();
+                } else if (ec != http::error::end_of_stream) {
+                    // 【防线2：协议格式校验 (Fail-fast)】
+                    // 客户端发来的不是标准 HTTP，或者直接断开了，系统自动触发
+                    // ec 报错
+                    // 这里我们只需打个日志，无需处理。当前类实例销毁时会自动释放底层
+                    // socket
+                    spdlog::warn(
+                        "[HttpSession] Invalid protocol or dropped: {}",
+                        ec.message());
+                }
+            });
     }
 
     static bool is_valid_match(const std::string& path,

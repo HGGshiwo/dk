@@ -1,5 +1,4 @@
 #pragma once
-#include <any>
 #include <functional>
 #include <memory>
 #include <stdexcept>
@@ -7,6 +6,7 @@
 #include <tuple>
 
 #include "./utils.hpp"
+#include "event_box.hpp"
 
 namespace dk {
 template <typename T, typename = void>
@@ -27,21 +27,52 @@ struct has_on_event<
 
 template <typename T>
 constexpr std::string_view get_type_name() {
+    std::string_view raw_name;
+
 #if defined(__clang__)
     constexpr std::string_view p = __PRETTY_FUNCTION__;
-    return p.substr(p.find("T = ") + 4,
-                    p.find_last_of(']') - (p.find("T = ") + 4));
+    constexpr auto start = p.find("T = ") + 4;
+    constexpr auto end = p.find_last_of(']');
+    raw_name = p.substr(start, end - start);
+
 #elif defined(__GNUC__)
     constexpr std::string_view p = __PRETTY_FUNCTION__;
-    return p.substr(p.find("with T = ") + 9,
-                    p.find_last_of(']') - (p.find("with T = ") + 9));
+    constexpr auto start = p.find("with T = ") + 9;
+    constexpr auto end = p.find_last_of(']');
+    raw_name = p.substr(start, end - start);
+
 #elif defined(_MSC_VER)
     constexpr std::string_view p = __FUNCSIG__;
-    return p.substr(p.find("get_type_name<") + 14,
-                    p.find_last_of('>') - (p.find("get_type_name<") + 14));
+    constexpr auto start = p.find("get_type_name<") + 14;
+    constexpr auto end = p.find_last_of('>');
+    raw_name = p.substr(start, end - start);
+
 #else
     return "Unknown";
 #endif
+
+    // 1. 去除 MSVC/GCC 可能携带的 C++ 关键字前缀
+    if (raw_name.rfind("struct ", 0) == 0) {
+        raw_name.remove_prefix(7);
+    } else if (raw_name.rfind("class ", 0) == 0) {
+        raw_name.remove_prefix(6);
+    } else if (raw_name.rfind("enum ", 0) == 0) {
+        raw_name.remove_prefix(5);
+    }
+
+    // 2. 去除末尾编译器附加的分号或内部参数修饰 (比如 GCC 在某些情况下跟着的
+    // ';')
+    auto semicolon_pos = raw_name.find(';');
+    if (semicolon_pos != std::string_view::npos) {
+        raw_name = raw_name.substr(0, semicolon_pos);
+    }
+
+    // 3. 【核心清洗】：解决某些编译器打印出来的 `__1` 或 `__cxx11`
+    // 内部内联命名空间 例如把 "std::__1::string" 换成 cleaner
+    // 的处理，或者去除以 `__` 开头的内联作用域 如果名字里有 inline namespace
+    // (如 `::__cxx11::` 或 `::__1::`)，将其跳过或保留核心部分
+
+    return raw_name;
 }
 
 // ==========================================
@@ -167,18 +198,71 @@ class StateAction {
     }
 };
 
+class TimeTracker {
+   private:
+    double elapsed_time_ = 0.0;
+    double delta_time_ = 0.0;
+
+   public:
+    virtual ~TimeTracker() = default;
+
+    void update_time(double dt) {
+        delta_time_ = dt;
+        elapsed_time_ += dt;
+    }
+
+    void reset_time() {
+        elapsed_time_ = 0.0;
+        delta_time_ = 0.0;
+    }
+
+    bool is_hz(double hz) const {
+        if (hz <= 0.0) return false;
+        double interval = 1.0 / hz;
+
+        uint64_t prev_tick_count =
+            static_cast<uint64_t>((elapsed_time_ - delta_time_) / interval);
+        uint64_t curr_tick_count =
+            static_cast<uint64_t>(elapsed_time_ / interval);
+
+        return curr_tick_count > prev_tick_count;
+    }
+
+    double get_elapsed_time() const { return elapsed_time_; }
+};
+
 // IState 接口返回 StateAction<Context>
 template <typename Context>
-class IState {
+class IState : public TimeTracker {
    public:
     IState<Context>* parent_ptr = nullptr;
     virtual ~IState() = default;
-    virtual StateAction<Context> handle_event(const std::any& event,
+    virtual StateAction<Context> handle_event(const EventBox& event,
                                               Context& ctx) = 0;
     virtual std::string name() const = 0;
+    virtual int id() const = 0;
     virtual std::string_view name_view() const = 0;
-    virtual void on_enter(Context& ctx) {}
+
+    virtual StateAction<Context> on_enter(Context& ctx) {
+        return StateAction<Context>::unhandled();
+    }
+    virtual StateAction<Context> on_tick(double dt, Context& ctx) {
+        return StateAction<Context>::unhandled();
+    }
     virtual void on_exit(Context& ctx) {}
+
+    StateAction<Context> internal_enter(Context& ctx) {
+        this->reset_time();  // 状态进入时重置时间
+        return on_enter(ctx);
+    }
+
+    StateAction<Context> internal_tick(double dt, Context& ctx) {
+        this->update_time(dt);
+        return on_tick(dt, ctx);
+    }
+
+    // 顺便送一个实用方法
+    double get_time_in_state() const { return this->get_elapsed_time(); }
 };
 
 /*
@@ -191,7 +275,7 @@ class IEventHandler : public BaseInterface {
    public:
     using BaseInterface::BaseInterface;
 
-    ReturnType handle_event(const std::any& event, Context& ctx) override {
+    ReturnType handle_event(const EventBox& event, Context& ctx) override {
         // 延迟推导类型，避开 CRTP 不完整类型问题
         static_assert(has_allowed_events<Derived>::value,
                       "FATAL ERROR: Missing AllowedEvents definition in your "
@@ -225,7 +309,7 @@ class IEventHandler : public BaseInterface {
     // === 新增两个 Helper 方法，专门用来解包 Tuple 里的类型 (Ts...)，避开 GCC 7
     // 崩溃 Bug ===
     template <typename... Ts>
-    bool dispatch_void_impl(const std::any& event, Context& ctx,
+    bool dispatch_void_impl(const EventBox& event, Context& ctx,
                             std::tuple<Ts...>*) {
         // 直接在类型包上展开，没有 auto&&，没有 decltype，极其纯粹，GCC
         // 绝对不会崩
@@ -233,15 +317,15 @@ class IEventHandler : public BaseInterface {
     }
 
     template <typename R, typename... Ts>
-    bool dispatch_ret_impl(const std::any& event, Context& ctx, R& result,
+    bool dispatch_ret_impl(const EventBox& event, Context& ctx, R& result,
                            std::tuple<Ts...>*) {
         return (try_handle_ret<Ts>(event, ctx, result) || ...);
     }
 
     // 专门处理期望返回 void 的分支
     template <typename E>
-    bool try_handle_void(const std::any& event, Context& ctx) {
-        if (const E* e = std::any_cast<E>(&event)) {
+    bool try_handle_void(const EventBox& event, Context& ctx) {
+        if (const E* e = event.cast_if_match<E>()) {
             static_assert(has_on_event<Derived, E, Context>::value,
                           "FATAL: Declared event in AllowedEvents but missing "
                           "on_event(const Event&, Context&)!");
@@ -253,8 +337,8 @@ class IEventHandler : public BaseInterface {
 
     // 专门处理期望有返回值的的分支
     template <typename E, typename R>
-    bool try_handle_ret(const std::any& event, Context& ctx, R& out_result) {
-        if (const E* e = std::any_cast<E>(&event)) {
+    bool try_handle_ret(const EventBox& event, Context& ctx, R& out_result) {
+        if (const E* e = event.cast_if_match<E>()) {
             static_assert(has_on_event<Derived, E, Context>::value,
                           "FATAL: Declared event in AllowedEvents but missing "
                           "on_event(const Event&, Context&)!");
@@ -271,6 +355,32 @@ class IEventHandler : public BaseInterface {
         }
         return false;
     }
+};
+
+// 全局注册中心 (单例)
+class StateRegistry {
+   public:
+    static StateRegistry& get() {
+        static StateRegistry instance;
+        return instance;
+    }
+
+    // 子类调用这个函数来注册自己，并获取一个独一无二的 ID
+    int register_state(const std::string& name) {
+        int id = next_id_++;
+        id_to_name_[id] = name;
+        return id;
+    }
+
+    // 获取所有的状态
+    const std::map<int, std::string>& get_all_states() const {
+        return id_to_name_;
+    }
+
+   private:
+    StateRegistry() = default;
+    int next_id_ = 1;  // 自动递增分配 ID
+    std::map<int, std::string> id_to_name_;
 };
 
 /*
@@ -310,6 +420,12 @@ class BaseState : public IEventHandler<IState<Context>, Context,
                   public AutoExtractTmpl<Derived>::type {
    public:
     using ParentState = Parent;
+
+    inline static int STATE_ID = StateRegistry::get().register_state(
+        std::string(get_type_name<Derived>()));
+
+    // 自动重写虚函数，返回自己领到的 ID 和名字
+    int id() const override { return STATE_ID; }
 
     static constexpr std::string_view static_name() {
         // 利用你原有的宏或模板提取类型名
@@ -396,4 +512,5 @@ class BaseState : public IEventHandler<IState<Context>, Context,
         }
     }
 };
+
 }  // namespace dk
