@@ -39,6 +39,8 @@ export const useVisualizerData = (_: boolean, isLocalMode: boolean, isPlaying: b
         sourcesRef.current = sources;
     }, [sources]);
 
+    const defaultSettings = { enabled: false, autoY: false, locked: true };
+
     // 从历史/文件数据提取源列表
     const extractSourcesFromPoints = (points: DataPoint[]) => {
         const newSourcesMap = new Map<string, SourceConfig>();
@@ -55,9 +57,7 @@ export const useVisualizerData = (_: boolean, isLocalMode: boolean, isPlaying: b
                             name: key.split("/").pop() || key,
                             topic: key,
                             type: "line",
-                            enabled: true,
-                            autoY: true,
-                            locked: false,
+                            ...defaultSettings,
                             color,
                         });
                     }
@@ -71,9 +71,7 @@ export const useVisualizerData = (_: boolean, isLocalMode: boolean, isPlaying: b
                             name: key.split("/").pop() || key,
                             topic: key,
                             type,
-                            enabled: true,
-                            autoY: true,
-                            locked: false,
+                            ...defaultSettings,
                             color,
                         });
                     }
@@ -86,9 +84,7 @@ export const useVisualizerData = (_: boolean, isLocalMode: boolean, isPlaying: b
                     name: "事件日志",
                     topic: "/drone/diagnostics/log_events",
                     type: "log",
-                    enabled: true,
-                    autoY: false,
-                    locked: true,
+                    ...defaultSettings,
                 });
             }
         });
@@ -153,16 +149,16 @@ export const useVisualizerData = (_: boolean, isLocalMode: boolean, isPlaying: b
 
                 if (isVector) {
                     if (value.length >= 3) {
-                        next.push({ id: topic + ".x", name: topic.split("/").pop() + ".x", topic: topic + ".x", type: "line", enabled: true, autoY: true, locked: false, color });
-                        next.push({ id: topic + ".y", name: topic.split("/").pop() + ".y", topic: topic + ".y", type: "line", enabled: true, autoY: true, locked: false, color: COLOR_LIST[(next.length + 1) % COLOR_LIST.length] });
-                        next.push({ id: topic + ".z", name: topic.split("/").pop() + ".z", topic: topic + ".z", type: "line", enabled: true, autoY: true, locked: false, color: COLOR_LIST[(next.length + 2) % COLOR_LIST.length] });
+                        next.push({ id: topic + ".x", name: topic.split("/").pop() + ".x", topic: topic + ".x", type: "line", ...defaultSettings, color });
+                        next.push({ id: topic + ".y", name: topic.split("/").pop() + ".y", topic: topic + ".y", type: "line", ...defaultSettings, color: COLOR_LIST[(next.length + 1) % COLOR_LIST.length] });
+                        next.push({ id: topic + ".z", name: topic.split("/").pop() + ".z", topic: topic + ".z", type: "line", ...defaultSettings, color: COLOR_LIST[(next.length + 2) % COLOR_LIST.length] });
                     } else if (value.length === 2) {
-                        next.push({ id: topic + ".x", name: topic.split("/").pop() + ".x", topic: topic + ".x", type: "line", enabled: true, autoY: true, locked: false, color });
-                        next.push({ id: topic + ".y", name: topic.split("/").pop() + ".y", topic: topic + ".y", type: "line", enabled: true, autoY: true, locked: false, color: COLOR_LIST[(next.length + 1) % COLOR_LIST.length] });
+                        next.push({ id: topic + ".x", name: topic.split("/").pop() + ".x", topic: topic + ".x", type: "line", ...defaultSettings, color });
+                        next.push({ id: topic + ".y", name: topic.split("/").pop() + ".y", topic: topic + ".y", type: "line", ...defaultSettings, color: COLOR_LIST[(next.length + 1) % COLOR_LIST.length] });
                     }
                 } else {
                     const type = fglog.type === "value" ? "line" : (fglog.type === "log" ? "log" : "state");
-                    next.push({ id: topic, name: topic.split("/").pop() || topic, topic, type, enabled: true, autoY: true, locked: false, color });
+                    next.push({ id: topic, name: topic.split("/").pop() || topic, topic, type, ...defaultSettings, color });
                 }
 
                 sourcesRef.current = next;
