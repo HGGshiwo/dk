@@ -1,5 +1,6 @@
 #pragma once
 #include "./state.hpp"
+#include "./utils.hpp"
 #include "event_box.hpp"
 
 namespace dk {

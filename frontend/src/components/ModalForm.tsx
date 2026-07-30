@@ -147,7 +147,7 @@ const FormModal = ({
   const getDefaultValues = useCallback((): Record<string, any> => {
     return formConfig.items.reduce(
       (acc, item) => {
-        acc[item.key] = item.default ?? "";
+        acc[item.key] = item.default ?? (item.type === "switch" ? false : "");
         return acc;
       },
 
@@ -267,7 +267,13 @@ const FormModal = ({
         ? [{ required: true, message: `请输入/选择${item.name}` }]
         : undefined;
       return (
-        <Form.Item key={key} label={item.name} name={key} rules={rules}>
+        <Form.Item
+          key={key}
+          label={item.name}
+          name={key}
+          rules={rules}
+          valuePropName={item.type === "switch" ? "checked" : "value"}
+        >
           {getInput(item, extraConfig?.[key])}
         </Form.Item>
       );

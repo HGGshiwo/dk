@@ -3,6 +3,7 @@
 #include <boost/filesystem.hpp>
 #include <fstream>
 #include <memory>
+#include <set>
 
 #include "./protocal.hpp"
 #include "./websocket.hpp"
@@ -376,6 +377,90 @@ class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
                      abs_path);
     }
 
+    void register_safe_file_stream_route(
+        boost::beast::http::verb method, const std::string& path,
+        std::function<std::set<std::string>()> get_safe_files) {
+        class SafeFileStreamHandler : public IProtocolHandler<WebAdapter> {
+            std::function<std::set<std::string>()> get_safe_files_;
+
+            std::string get_query_param(boost::beast::string_view target,
+                                        const std::string& key) {
+                auto pos = target.find('?');
+                if (pos == boost::beast::string_view::npos) return "";
+                auto query = target.substr(pos + 1);
+                std::string key_eq = key + "=";
+                auto key_pos = query.find(key_eq);
+                if (key_pos == boost::beast::string_view::npos) return "";
+                auto val_start = key_pos + key_eq.length();
+                auto val_end = query.find('&', val_start);
+                if (val_end == boost::beast::string_view::npos) {
+                    return std::string(query.substr(val_start));
+                }
+                return std::string(
+                    query.substr(val_start, val_end - val_start));
+            }
+
+           public:
+            SafeFileStreamHandler(
+                std::function<std::set<std::string>()> get_safe_files)
+                : get_safe_files_(std::move(get_safe_files)) {}
+
+            void handle(std::shared_ptr<HttpSession<WebAdapter>> session,
+                        http::request<http::string_body> req) override {
+                try {
+                    std::set<std::string> paths = get_safe_files_();
+                    std::string file_param =
+                        get_query_param(req.target(), "file");
+
+                    if (file_param.empty()) {
+                        std::vector<std::string> filenames;
+                        for (const auto& p : paths) {
+                            filenames.push_back(
+                                boost::filesystem::path(p).filename().string());
+                        }
+                        nlohmann::json j_list = filenames;
+                        session->send_http_response(http::status::ok,
+                                                    j_list.dump(),
+                                                    "application/json");
+                    } else {
+                        std::string matched_path = "";
+                        for (const auto& p : paths) {
+                            if (boost::filesystem::path(p)
+                                    .filename()
+                                    .string() == file_param) {
+                                matched_path = p;
+                                break;
+                            }
+                        }
+
+                        if (matched_path.empty() ||
+                            !boost::filesystem::exists(matched_path)) {
+                            session->send_http_response(
+                                http::status::forbidden,
+                                "{\"status\":\"error\",\"msg\":\"Access denied "
+                                "or file not found\"}");
+                            return;
+                        }
+
+                        session->serve_file(matched_path);
+                    }
+                } catch (const std::exception& ex) {
+                    session->send_http_response(
+                        http::status::bad_request,
+                        "{\"status\":\"error\",\"msg\":\"Bad request\"}");
+                }
+            }
+        };
+
+        register_handler(
+            method, path,
+            std::make_shared<SafeFileStreamHandler>(std::move(get_safe_files)));
+
+        spdlog::info(
+            "[WebAdapter] Register safe file stream route: method={} path={}",
+            std::string(boost::beast::http::to_string(method)), path);
+    }
+
     // 开启全局 CORS 的方法
     void enable_cors(
         const std::string& allow_origin = "*",
@@ -579,6 +664,56 @@ class HttpSession
 
         file_res_->keep_alive(req_.keep_alive());
         file_res_->prepare_payload();
+        // 异步写出文件
+        auto self = this->shared_from_this();
+        http::async_write(socket_, *file_res_,
+                          [self](beast::error_code ec, std::size_t) {
+                              if (!self->file_res_->keep_alive()) {
+                                  beast::error_code ignored_ec;
+                                  self->socket_.shutdown(
+                                      tcp::socket::shutdown_send, ignored_ec);
+                              } else if (!ec) {
+                                  self->file_res_.reset();
+                                  self->req_ = {};
+                                  self->read_request();
+                              }
+                          });
+    }
+
+    void serve_file(const std::string& target_path,
+                    std::string mime_type = "") {
+        if (socket_released_) return;
+
+        if (mime_type.empty()) {
+            mime_type = std::string(get_mime_type(target_path));
+        }
+
+        beast::error_code ec;
+        http::file_body::value_type file;
+        file.open(target_path.c_str(), beast::file_mode::scan, ec);
+
+        // 文件打开失败 (不存在或无权限)
+        if (ec) {
+            spdlog::error("[WebAdapter] file {} not available: {}", target_path,
+                          ec.message());
+            send_http_response(http::status::not_found, "File not found");
+            return;
+        }
+
+        // 构造文件响应体
+        file_res_ = std::make_shared<http::response<http::file_body>>(
+            std::piecewise_construct, std::make_tuple(std::move(file)),
+            std::make_tuple(http::status::ok, req_.version()));
+
+        if (adapter_->cors_enabled_) {
+            file_res_->set(http::field::access_control_allow_origin,
+                           adapter_->cors_origin_);
+        }
+        file_res_->set(http::field::server, "WebAdapter");
+        file_res_->set(http::field::content_type, mime_type);
+        file_res_->keep_alive(req_.keep_alive());
+        file_res_->prepare_payload();
+
         // 异步写出文件
         auto self = this->shared_from_this();
         http::async_write(socket_, *file_res_,

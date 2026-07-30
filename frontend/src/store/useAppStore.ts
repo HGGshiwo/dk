@@ -102,7 +102,7 @@ const handleFglog = (data: any) => {
         dataPoint[topic + ".y"] = value[1];
       }
     } else {
-      if (topic.includes("log") || topic.endsWith("log_events") || topic.endsWith("/log")) {
+      if (fglog.type === "log") {
         dataPoint.log = value;
       } else {
         dataPoint[topic] = value;
@@ -143,15 +143,10 @@ const initWebSocket = () => {
     ws.onopen = () => {
       console.log("WebSocket连接成功");
       useAppStore.setState({ wsStatus: "open" });
-      clearLocalStorageHistory();
+      // fglog_enable will be explicitly triggered by the user via the visualizer UI
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
-      }
-      try {
-        ws.send(JSON.stringify({ fglog_enable: true }));
-      } catch (err) {
-        console.error("发送 fglog_enable 指令失败", err);
       }
     };
 

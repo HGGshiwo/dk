@@ -41,7 +41,6 @@ export const CanvasRenderer: React.FC<Props> = ({
     visible,
     sourcesRef,
     mergedDataRef,
-    lastTimeRef,
     dragOffset,
     setDragOffset,
     timeWindow,
@@ -94,7 +93,7 @@ export const CanvasRenderer: React.FC<Props> = ({
             const hX = hoverXRef.current;
             const hY = hoverYRef.current;
             const isYAxisArea = hX !== null && hX < 45;
-            const isXAxisArea = hX !== null && hY !== null && hX >= 45 && hY >= rect.height - 20;
+            const isXAxisArea = hX !== null && hY !== null && hX >= 45 && hY >= rect.height - 30;
 
             if (isYAxisArea) {
                 const zoomFactor = e.deltaY < 0 ? 0.9 : 1.1;
@@ -111,7 +110,7 @@ export const CanvasRenderer: React.FC<Props> = ({
                 });
                 zoomFactorsRef.current = nextFactors;
                 setZoomFactors(nextFactors);
-            } else if (isXAxisArea) {
+            } else if (isXAxisArea || e.ctrlKey) {
                 const zoomFactor = e.deltaY < 0 ? 0.9 : 1.1;
                 setTimeWindow((prev) => {
                     const val = Math.max(2, Math.min(180, prev * zoomFactor));
@@ -163,7 +162,7 @@ export const CanvasRenderer: React.FC<Props> = ({
             const paddingLeft = 45;
             const paddingRight = 15;
             const paddingTop = 8;
-            const paddingBottom = 20;
+            const paddingBottom = 30;
             const chartWidth = w - paddingLeft - paddingRight;
             const chartHeight = h - paddingTop - paddingBottom;
             const data = mergedDataRef.current;
@@ -195,12 +194,40 @@ export const CanvasRenderer: React.FC<Props> = ({
                 return;
             }
 
-            const maxTime = lastTimeRef.current;
-            const tMax = maxTime - dragOffsetRef.current;
-            const tMin = tMax - timeWindowRef.current;
+            if (data.length > 0) {
+                let lastAbs = data[0].time;
+                let lastComp = 0;
+                data[0].compressedTime = 0;
+                for (let i = 1; i < data.length; i++) {
+                    const currentAbs = data[i].time;
+                    let dt = currentAbs - lastAbs;
+                    if (dt < 0) {
+                        dt = 0;
+                    } else if (dt > 10) {
+                        dt = 2;
+                    }
+                    const currentComp = lastComp + dt;
+                    data[i].compressedTime = currentComp;
+                    lastAbs = currentAbs;
+                    lastComp = currentComp;
+                }
+            }
 
-            const tToX = (time: number) => paddingLeft + ((time - tMin) / timeWindowRef.current) * chartWidth;
-            const xToT = (x: number) => tMin + ((x - paddingLeft) / chartWidth) * timeWindowRef.current;
+            const formatAbsoluteTime = (timeSec: number) => {
+                const d = new Date(timeSec * 1000);
+                const hrs = String(d.getHours()).padStart(2, "0");
+                const mins = String(d.getMinutes()).padStart(2, "0");
+                const secs = String(d.getSeconds()).padStart(2, "0");
+                const tenths = Math.floor(d.getMilliseconds() / 100);
+                return `${hrs}:${mins}:${secs}.${tenths}`;
+            };
+
+            const maxTimeComp = data.length > 0 ? data[data.length - 1].compressedTime! : 0;
+            const tMaxComp = maxTimeComp - dragOffsetRef.current;
+            const tMinComp = tMaxComp - timeWindowRef.current;
+
+            const tToX = (compTime: number) => paddingLeft + ((compTime - tMinComp) / timeWindowRef.current) * chartWidth;
+            const xToT = (x: number) => tMinComp + ((x - paddingLeft) / chartWidth) * timeWindowRef.current;
 
             const lineSources = sourcesRef.current.filter((s) => s.type === "line" && s.enabled);
             const stateSources = sourcesRef.current.filter((s) => s.type === "state" && s.enabled);
@@ -260,7 +287,7 @@ export const CanvasRenderer: React.FC<Props> = ({
                     let hasLocalPoints = false;
 
                     for (const pt of data) {
-                        if (pt.time >= tMin && pt.time <= tMax) {
+                        if (pt.compressedTime! >= tMinComp && pt.compressedTime! <= tMaxComp) {
                             const val = pt[key];
                             if (typeof val === "number" && !isNaN(val)) {
                                 hasLocalPoints = true;
@@ -288,10 +315,13 @@ export const CanvasRenderer: React.FC<Props> = ({
                     ctx.beginPath();
                     let first = true;
                     for (const pt of data) {
-                        if (pt.time < tMin - 2) continue;
-                        if (pt.time > tMax + 2) break;
-                        const x = tToX(pt.time);
-                        const y = localValToY(pt[key]);
+                        if (pt.compressedTime! < tMinComp - 2) continue;
+                        if (pt.compressedTime! > tMaxComp + 2) break;
+                        const val = pt[key];
+                        if (val === undefined || val === null || typeof val !== "number" || isNaN(val)) continue;
+
+                        const x = tToX(pt.compressedTime!);
+                        const y = localValToY(val);
                         if (first) { ctx.moveTo(x, y); first = false; } else { ctx.lineTo(x, y); }
                     }
                     ctx.stroke();
@@ -305,7 +335,7 @@ export const CanvasRenderer: React.FC<Props> = ({
                     let localMin = Infinity;
                     let localMax = -Infinity;
                     data.forEach((pt) => {
-                        if (pt.time >= tMin && pt.time <= tMax) {
+                        if (pt.compressedTime! >= tMinComp && pt.compressedTime! <= tMaxComp) {
                             const val = pt[primaryRefId];
                             if (typeof val === "number" && !isNaN(val)) {
                                 localMin = Math.min(localMin, val);
@@ -346,8 +376,8 @@ export const CanvasRenderer: React.FC<Props> = ({
                     for (let i = 0; i < statePoints.length; i++) {
                         const pt = statePoints[i];
                         const nextPt = statePoints[i + 1];
-                        const startT = pt.time;
-                        const endT = nextPt ? nextPt.time : tMax;
+                        const startT = pt.compressedTime!;
+                        const endT = nextPt ? nextPt.compressedTime! : tMaxComp;
                         const val = pt[key];
                         const xStart = tToX(startT);
                         const xEnd = tToX(endT);
@@ -380,10 +410,10 @@ export const CanvasRenderer: React.FC<Props> = ({
                 ctx.clip(clipPath);
 
                 for (const pt of data) {
-                    if (pt.time < tMin) continue;
-                    if (pt.time > tMax) break;
+                    if (pt.compressedTime! < tMinComp) continue;
+                    if (pt.compressedTime! > tMaxComp) break;
                     if (pt.log) {
-                        const x = tToX(pt.time);
+                        const x = tToX(pt.compressedTime!);
                         ctx.fillStyle = "#7c3aed";
                         ctx.beginPath();
                         ctx.arc(x, logYStart + thinTrackHeight / 2, 2.5, 0, Math.PI * 2);
@@ -399,11 +429,29 @@ export const CanvasRenderer: React.FC<Props> = ({
             }
 
             // X 轴底部时间网格与文本
+            if (isHoveringXAxis) {
+                ctx.fillStyle = "rgba(59, 130, 246, 0.07)";
+                ctx.fillRect(paddingLeft, h - paddingBottom, chartWidth, paddingBottom);
+            }
+
             ctx.strokeStyle = "#e2e8f0";
             ctx.lineWidth = 0.5;
             for (let i = 0; i <= 5; i++) {
-                const t = tMin + (i / 5) * timeWindowRef.current;
-                const x = tToX(t);
+                const compT = tMinComp + (i / 5) * timeWindowRef.current;
+                const x = paddingLeft + (i / 5) * chartWidth;
+                
+                let closestPt = data[0];
+                if (data.length > 0) {
+                    let minDist = Math.abs(data[0].compressedTime! - compT);
+                    for (const pt of data) {
+                        const dist = Math.abs(pt.compressedTime! - compT);
+                        if (dist < minDist) {
+                            minDist = dist;
+                            closestPt = pt;
+                        }
+                    }
+                }
+
                 if (x >= paddingLeft && x <= w - paddingRight) {
                     ctx.beginPath();
                     ctx.moveTo(x, paddingTop);
@@ -414,13 +462,13 @@ export const CanvasRenderer: React.FC<Props> = ({
                     ctx.font = "12px monospace";
                     ctx.textAlign = "center";
                     ctx.textBaseline = "top";
-                    ctx.fillText(`${t.toFixed(1)}s`, x, h - paddingBottom + 3);
+                    ctx.fillText(formatAbsoluteTime(closestPt.time), x, h - paddingBottom + 5);
                 }
             }
 
             // Tooltip 悬浮框绘制
             if (hX !== null && hX >= paddingLeft && hX <= w - paddingRight && !isHoveringYAxis && !isHoveringXAxis) {
-                const activeT = xToT(hX);
+                const activeCompT = xToT(hX);
                 ctx.strokeStyle = "rgba(0, 0, 0, 0.4)";
                 ctx.lineWidth = 1;
                 ctx.setLineDash([3, 3]);
@@ -433,12 +481,12 @@ export const CanvasRenderer: React.FC<Props> = ({
                 let activePoint: DataPoint | null = null;
                 let minDist = Infinity;
                 for (const pt of data) {
-                    const dist = Math.abs(pt.time - activeT);
+                    const dist = Math.abs(pt.compressedTime! - activeCompT);
                     if (dist < minDist) { minDist = dist; activePoint = pt; }
                 }
 
                 if (activePoint) {
-                    const tooltipWidth = 160;
+                    const tooltipWidth = 180;
                     const tooltipHeight = (1 + lineSources.length + stateSources.length) * 15 + 10;
                     let tooltipX = hX + 10;
                     if (tooltipX + tooltipWidth > w) tooltipX = hX - tooltipWidth - 10;
@@ -455,7 +503,7 @@ export const CanvasRenderer: React.FC<Props> = ({
                     ctx.textAlign = "left";
                     ctx.textBaseline = "top";
                     let textY = tooltipY + 6;
-                    ctx.fillText(`时间: ${activePoint.time.toFixed(2)}s`, tooltipX + 8, textY);
+                    ctx.fillText(`时间: ${formatAbsoluteTime(activePoint.time)}`, tooltipX + 8, textY);
                     textY += 15;
 
                     ctx.font = "11px monospace";
@@ -498,7 +546,7 @@ export const CanvasRenderer: React.FC<Props> = ({
 
         isDraggingRef.current = true;
         isTouchYAxisRef.current = x < 45;
-        isTouchXAxisRef.current = x >= 45 && y >= rect.height - 20;
+        isTouchXAxisRef.current = x >= 45 && y >= rect.height - 30;
 
         touchStartClientXRef.current = e.clientX;
         touchStartClientYRef.current = e.clientY;

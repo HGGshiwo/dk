@@ -8,7 +8,7 @@ import {
   message,
   Radio,
 } from "antd";
-import { AimOutlined, EditOutlined, CloseOutlined, ProfileOutlined, ControlOutlined } from '@ant-design/icons';
+import { AimOutlined, EditOutlined, CloseOutlined, ControlOutlined } from '@ant-design/icons';
 import type { ColumnsType } from "antd/es/table";
 import "./WaypointEditor.css";
 import { useAppStore } from "../../store/useAppStore";
@@ -217,7 +217,7 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const followIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const drawCanvasRef = useRef<() => void>(() => {});
+  const drawCanvasRef = useRef<() => void>(() => { });
 
   const latLonToWorld = useCallback(
     (lat: number, lon: number): Point => {
@@ -794,9 +794,9 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
         if (!origin) return;
         const direction = followState.currentMousePoint
           ? {
-              dx: followState.currentMousePoint.x - followState.startPoint!.x,
-              dy: followState.currentMousePoint.y - followState.startPoint!.y,
-            }
+            dx: followState.currentMousePoint.x - followState.startPoint!.x,
+            dy: followState.currentMousePoint.y - followState.startPoint!.y,
+          }
           : { dx: 0, dy: 0 };
         const deltaLon = direction.dx / METERS_PER_DEGREE_LON(origin.lat); // 经度差（度）
         const deltaLat = direction.dy / METERS_PER_DEGREE_LAT;             // 纬度差（度）
@@ -804,7 +804,7 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
         const data = {
           pos: [
             followState.startPoint!.x / METERS_PER_DEGREE_LON(origin.lat) +
-              origin.lon,
+            origin.lon,
             followState.startPoint!.y / METERS_PER_DEGREE_LAT + origin.lat,
             followState.followHeight,
           ],
@@ -1024,7 +1024,7 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
           gap: '16px'
         }}>
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
-            <Button 
+            <Button
               shape="circle"
               icon={<AimOutlined />}
               ref={btnRef}
@@ -1033,7 +1033,7 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
             <span style={{ fontSize: '12px', color: '#666', fontWeight: 500 }}>重置</span>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
-            <Button 
+            <Button
               type={showWaypointPanel ? "default" : "primary"}
               shape="circle"
               icon={showWaypointPanel ? <CloseOutlined /> : <EditOutlined />}
@@ -1045,7 +1045,7 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
             </span>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
-            <Button 
+            <Button
               type={showJoystick ? "default" : "primary"}
               shape="circle"
               icon={showJoystick ? <CloseOutlined /> : <ControlOutlined />}
@@ -1056,16 +1056,7 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
               {showJoystick ? '关闭' : '摇杆'}
             </span>
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
-            <Button 
-              type="primary"
-              shape="circle"
-              icon={<ProfileOutlined />}
-              onClick={() => useAppStore.getState().setLogboxVisible(true)}
-              style={{ boxShadow: '0 4px 12px rgba(0,0,0,0.15)' }}
-            />
-            <span style={{ fontSize: '12px', color: '#666', fontWeight: 500 }}>日志</span>
-          </div>
+
         </div>
       </div>
 
@@ -1084,7 +1075,7 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
             <VirtualJoystick
               onMove={(data) => {
                 // 左手: 上是z, 右是w
-                joystickState.current.z = data.y; 
+                joystickState.current.z = data.y;
                 joystickState.current.w = data.x;
               }}
             />
@@ -1243,9 +1234,9 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
                   跟随中... 方向:{" "}
                   {followState.currentMousePoint
                     ? `(${(followState.currentMousePoint.x - (followState.startPoint?.x || 0)).toFixed(2)}, ${(
-                        followState.currentMousePoint.y -
-                        (followState.startPoint?.y || 0)
-                      ).toFixed(2)})`
+                      followState.currentMousePoint.y -
+                      (followState.startPoint?.y || 0)
+                    ).toFixed(2)})`
                     : "无"}
                 </div>
               )}

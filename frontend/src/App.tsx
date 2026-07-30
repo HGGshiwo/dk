@@ -6,13 +6,15 @@ import { useAppStore, cleanupWebSocket } from "./store/useAppStore";
 import { VirtualJoystickGroup } from "./components/VirtualJoystick";
 import LogOutputBox from "./components/LogOutputBox/indext";
 import { ConfigProvider, Spin, Modal, Button, Tooltip, type ThemeConfig } from "antd";
-import { AreaChartOutlined } from "@ant-design/icons";
+import { AreaChartOutlined, FileTextOutlined } from "@ant-design/icons";
 import WaypointEditor from "./components/WaypointEditor";
 import { FoxgloveVisualizer } from "./components/FoxgloveVisualizer";
+import { SpdLogViewer } from "./components/SpdLogViewer";
 
 function App() {
   const [isWaypointEditing, setIsWaypointEditing] = useState(false);
   const [isVisualizerOpen, setIsVisualizerOpen] = useState(false);
+  const [isSpdLogOpen, setIsSpdLogOpen] = useState(false);
   
   const theme: ThemeConfig = {
     components: {
@@ -86,9 +88,29 @@ function App() {
           <StateDisplay />
         </div>
         
-        {/* 左侧可视化触发按钮 */}
+        {/* 左侧控制按钮组 */}
         {!isWaypointEditing && (
-          <div style={{ position: 'absolute', left: '16px', top: '50%', transform: 'translateY(-50%)', zIndex: 30 }}>
+          <div style={{ position: 'absolute', left: '16px', top: '50%', transform: 'translateY(-50%)', zIndex: 30, display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            <Tooltip title="系统日志 (spdlog)" placement="right">
+              <Button 
+                type="primary" 
+                shape="circle" 
+                icon={<FileTextOutlined style={{ fontSize: '20px' }} />} 
+                size="large"
+                onClick={() => setIsSpdLogOpen(true)}
+                style={{ 
+                  width: '48px', 
+                  height: '48px', 
+                  boxShadow: '0 4px 12px rgba(0,0,0,0.35)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  backgroundColor: '#0ea5e9', // sky-500
+                  borderColor: '#0284c7' // sky-600
+                }}
+              />
+            </Tooltip>
+            
             <Tooltip title="可视化诊断 (Foxglove 模式)" placement="right">
               <Button 
                 type="primary" 
@@ -132,6 +154,11 @@ function App() {
         >
           <LogOutputBox title={null} />
         </Modal>
+
+        <SpdLogViewer 
+          visible={isSpdLogOpen}
+          onClose={() => setIsSpdLogOpen(false)}
+        />
 
         {/* Foxglove Visualizer Modal */}
         <FoxgloveVisualizer 

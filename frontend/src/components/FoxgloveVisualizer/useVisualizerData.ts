@@ -139,7 +139,8 @@ export const useVisualizerData = (_: boolean, isLocalMode: boolean, isPlaying: b
             const fglog = data.fglog ? data.fglog : data;
             if (!fglog || fglog.time === undefined || !fglog.topic || fglog.value === undefined) return;
 
-            const { time, topic, value } = fglog;
+            const time = fglog.time / 1000.0;
+            const { topic, value } = fglog;
 
             // 1. 动态注册 Source
             setSources((prev) => {
@@ -160,8 +161,7 @@ export const useVisualizerData = (_: boolean, isLocalMode: boolean, isPlaying: b
                         next.push({ id: topic + ".y", name: topic.split("/").pop() + ".y", topic: topic + ".y", type: "line", enabled: true, autoY: true, locked: false, color: COLOR_LIST[(next.length + 1) % COLOR_LIST.length] });
                     }
                 } else {
-                    // 还原原始的日志识别规则 (包含长文本判断)
-                    const type = typeof value === "number" ? "line" : (topic.includes("log") || (typeof value === "string" && value.length > 20)) ? "log" : "state";
+                    const type = fglog.type === "value" ? "line" : (fglog.type === "log" ? "log" : "state");
                     next.push({ id: topic, name: topic.split("/").pop() || topic, topic, type, enabled: true, autoY: true, locked: false, color });
                 }
 
@@ -187,7 +187,7 @@ export const useVisualizerData = (_: boolean, isLocalMode: boolean, isPlaying: b
                     id = matchedHardcoded.id;
                 }
 
-                if (topic.includes("log") || topic.endsWith("log_events") || topic.endsWith("/log")) {
+                if (fglog.type === "log") {
                     dataPoint.log = value;
                 } else {
                     dataPoint[id] = value;

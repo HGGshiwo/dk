@@ -139,4 +139,37 @@ struct callable_traits<R (ClassType::*)(Args...)> {
 };
 }  // namespace meta_utils
 
+class TimeTracker {
+   private:
+    double elapsed_time_ = 0.0;
+    double delta_time_ = 0.0;
+
+   public:
+    virtual ~TimeTracker() = default;
+
+    void update_time(double dt) {
+        delta_time_ = dt;
+        elapsed_time_ += dt;
+    }
+
+    void reset_time() {
+        elapsed_time_ = 0.0;
+        delta_time_ = 0.0;
+    }
+
+    bool is_hz(double hz) const {
+        if (hz <= 0.0) return false;
+        double interval = 1.0 / hz;
+
+        uint64_t prev_tick_count =
+            static_cast<uint64_t>((elapsed_time_ - delta_time_) / interval);
+        uint64_t curr_tick_count =
+            static_cast<uint64_t>(elapsed_time_ / interval);
+
+        return curr_tick_count > prev_tick_count;
+    }
+
+    double get_elapsed_time() const { return elapsed_time_; }
+};
+
 }  // namespace dk
