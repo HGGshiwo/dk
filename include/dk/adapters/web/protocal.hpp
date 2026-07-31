@@ -118,8 +118,8 @@ class ConnectionManager {
         }
     }
 
-    void publish_fglog(const nlohmann::json& msg_json,
-                       const std::function<bool(size_t)>& filter) {
+    void publish(const nlohmann::json& msg_json,
+                 const std::function<bool(size_t)>& filter) {
         std::lock_guard<std::mutex> lock(mutex_);
         for (auto& [id, conn] : connections_) {
             if (filter(id)) {
