@@ -66,17 +66,23 @@ function(dk_create_json_library LIB_NAME SCAN_DIR)
     set(GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/dk_json_${LIB_NAME}")
     set(GENERATED_HEADER "${GENERATED_DIR}/dk_auto_json.hpp")
 
+    if(EXISTS "${SCAN_DIR}/include")
+        set(SCAN_TARGET "${SCAN_DIR}/include")
+    else()
+        set(SCAN_TARGET "${SCAN_DIR}")
+    endif()
+
     file(GLOB_RECURSE USER_HEADERS 
          CONFIGURE_DEPENDS 
-         "${SCAN_DIR}/*.hpp" "${SCAN_DIR}/*.h"
+         "${SCAN_TARGET}/*.hpp" "${SCAN_TARGET}/*.h"
     )
 
-    message(STATUS "[Framework] 准备为 ${LIB_NAME} 生成 JSON 头文件，扫描目录: ${SCAN_DIR}")
+    message(STATUS "[Framework] 准备为 ${LIB_NAME} 生成 JSON 头文件，扫描目录: ${SCAN_TARGET}")
 
     add_custom_command(
         OUTPUT "${GENERATED_HEADER}"
         COMMAND Python3::Interpreter "${AUTO_JSON_SCRIPT}" 
-                -d "${SCAN_DIR}" 
+                -d "${SCAN_TARGET}" 
                 -o "${GENERATED_HEADER}" 
                 -j "<nlohmann/json.hpp>"
         DEPENDS ${USER_HEADERS} "${AUTO_JSON_SCRIPT}"

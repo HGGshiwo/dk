@@ -134,22 +134,23 @@ inline void from_json(const nlohmann::json& j, {struct_name}& t) {{
 
     # 生成全局头文件
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    with open(output_file, "w", encoding="utf-8") as f:
-        f.write("// 本文件由框架自动生成\n")
-        f.write("#pragma once\n")
-        f.write(f"#include {json_include_path}\n")
-        f.write("#include <optional>\n")
-        f.write("#include <stdexcept>\n")  # 新增：用于抛出异常
-        f.write("#include <string>\n\n")  # 新增：用于字符串拼接
 
-        for inc in sorted(included_files):
-            f.write(f'#include "{inc}"\n')
+    lines = []
+    lines.append("// 本文件由框架自动生成")
+    lines.append("#pragma once")
+    lines.append(f"#include {json_include_path}")
+    lines.append("#include <optional>")
+    lines.append("#include <stdexcept>")  # 新增：用于抛出异常
+    lines.append("#include <string>\n")  # 新增：用于字符串拼接
 
-        # ==========================================
-        # 🌟 核心修改处：自动注入 optional 序列化补丁
-        # ==========================================
-        f.write(
-            """
+    for inc in sorted(included_files):
+        lines.append(f'#include "{inc}"')
+
+    # ==========================================
+    # 🌟 核心修改处：自动注入 optional 序列化补丁
+    # ==========================================
+    lines.append(
+        """
 // =====================================================================
 // 自动注入: 支持 std::optional 的 JSON 序列化器
 // =====================================================================
@@ -221,21 +222,37 @@ namespace nlohmann {
 }
 #endif
 // =====================================================================
-
 """
+    )
+
+    if namespace:
+        lines.append(f"namespace {namespace} {{\n")
+
+    for macro in generated_macros:
+        lines.append(macro + "\n")
+
+    if namespace:
+        lines.append(f"}} // namespace {namespace}")
+
+    new_content = "\n".join(lines) + "\n"
+
+    # 对比已有文件内容
+    old_content = ""
+    if os.path.exists(output_file):
+        try:
+            with open(output_file, "r", encoding="utf-8") as f:
+                old_content = f.read()
+        except:
+            pass
+
+    if new_content != old_content:
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write(new_content)
+        print(f"✅ 生成并更新成功！共处理 {len(included_files)} 个文件。")
+    else:
+        print(
+            f"✅ 内容无变化，跳过更新，保持时间戳不变。共处理 {len(included_files)} 个文件。"
         )
-        # ==========================================
-
-        if namespace:
-            f.write(f"namespace {namespace} {{\n\n")
-
-        for macro in generated_macros:
-            f.write(macro + "\n\n")
-
-        if namespace:
-            f.write(f"}} // namespace {namespace}\n")
-
-    print(f"✅ 生成成功！共处理 {len(included_files)} 个文件。")
 
 
 if __name__ == "__main__":

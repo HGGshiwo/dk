@@ -552,6 +552,182 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
         return wait(token, std::forward<Funcs>(funcs)...);
     }
 
+    // 延迟若干秒（支持小数，如 1.5 秒）后在主事件线程执行任务
+    // 返回一个函数，在执行前调用它可取消本次延迟任务
+    std::function<void()> call_later(double seconds,
+                                     std::function<void()> task) {
+        return time_provider_->set_timeout(
+            seconds, [this, task = std::move(task)]() {
+                // 确保任务安全投递回 Engine 的事件主线程执行
+                boost::asio::post(io_context_, std::move(task));
+            });
+    }
+
+    // 延迟若干秒，返回 Future<void>，支持与原有异步体系配合
+    Future<void> delay(double seconds) {
+        auto dispatcher = [this](std::function<void()> cb) {
+            this->post_future_task(std::move(cb));
+        };
+        auto timeout_scheduler = [this](uint32_t ms,
+                                        std::function<void()> on_timeout) {
+            return this->set_future_timeout(ms, std::move(on_timeout));
+        };
+
+        auto promise = std::make_shared<Promise<void>>(
+            std::move(dispatcher), std::move(timeout_scheduler));
+
+        // 用一个 std::shared_ptr 存放 cancellation 函数来延续其生命周期
+        auto cancel_fn = std::make_shared<std::function<void()>>();
+
+        // 设置定时器，定时到达后 resolve future
+        *cancel_fn =
+            time_provider_->set_timeout(seconds, [this, promise, cancel_fn]() {
+                boost::asio::post(io_context_, [promise, cancel_fn]() {
+                    if (promise->state() == PromiseState::PENDING) {
+                        promise->resolve();
+                    }
+                });
+            });
+
+        return promise->get_future();
+    }
+
+    // 周期性循环调用：
+    // - times > 0: 最多执行 times 次
+    // - times < 0: 无限循环（必须内部返回 false 或被外部调用返回值取消）
+    // - 支持 task 返回 bool：返回 false 可在内部立即安全终止循环！
+    template <typename Func>
+    std::function<void()> call_every(double interval_sec, int times,
+                                     Func&& task) {
+        if (times == 0) return []() {};
+
+        struct ControlBlock {
+            int remaining;
+            bool cancelled{false};
+            std::function<void()> current_cancel_fn;
+        };
+        auto ctrl = std::make_shared<ControlBlock>(ControlBlock{times});
+
+        std::shared_ptr<std::function<void()>> step_fn =
+            std::make_shared<std::function<void()>>();
+
+        *step_fn = [this, interval_sec, task = std::forward<Func>(task), ctrl,
+                    step_fn, times]() mutable {
+            if (ctrl->cancelled || ctrl->remaining == 0) return;
+
+            // --- 1. 智能适配返回值：判断内部是否要求中止 ---
+            bool should_continue = true;
+            if constexpr (std::is_invocable_v<Func, int>) {
+                using RetType = std::invoke_result_t<Func, int>;
+                int idx = times - ctrl->remaining;
+                if constexpr (std::is_convertible_v<RetType, bool>) {
+                    should_continue = task(idx);
+                } else {
+                    task(idx);
+                }
+            } else if constexpr (std::is_invocable_v<Func>) {
+                using RetType = std::invoke_result_t<Func>;
+                if constexpr (std::is_convertible_v<RetType, bool>) {
+                    should_continue = task();
+                } else {
+                    task();
+                }
+            } else {
+                static_assert(
+                    std::is_invocable_v<Func> || std::is_invocable_v<Func, int>,
+                    "task must accept either () or (int) as arguments!");
+            }
+
+            // --- 2. 扣减次数并判断终结条件 ---
+            if (ctrl->remaining > 0) {
+                ctrl->remaining--;
+            }
+
+            // 内部触发中止，或者已经达到了规定次数 -> 彻底收尾
+            if (!should_continue || ctrl->remaining == 0) {
+                ctrl->cancelled = true;
+                return;
+            }
+
+            // --- 3. 还有剩余，预约下一次 ---
+            if (!ctrl->cancelled) {
+                ctrl->current_cancel_fn = time_provider_->set_timeout(
+                    interval_sec, [this, ctrl, step_fn]() {
+                        boost::asio::post(io_context_,
+                                          [step_fn]() { (*step_fn)(); });
+                    });
+            }
+        };
+
+        // 立即向事件队列派发第一次执行
+        boost::asio::post(io_context_, [step_fn]() { (*step_fn)(); });
+
+        // 外部手动取消句柄
+        return [ctrl]() {
+            ctrl->cancelled = true;
+            if (ctrl->current_cancel_fn) {
+                ctrl->current_cancel_fn();
+            }
+        };
+    }
+
+    // 周期循环执行 times 次，并在【全部结束后】 Resolve 一个 Future<void>
+    Future<void> repeat_async(double interval_sec, int times,
+                              std::function<void(int current_idx)> task) {
+        auto dispatcher = [this](std::function<void()> cb) {
+            this->post_future_task(std::move(cb));
+        };
+        auto timeout_scheduler = [this](uint32_t ms,
+                                        std::function<void()> on_timeout) {
+            return this->set_future_timeout(ms, std::move(on_timeout));
+        };
+
+        auto promise = std::make_shared<Promise<void>>(
+            std::move(dispatcher), std::move(timeout_scheduler));
+
+        if (times <= 0) {
+            promise->resolve();
+            return promise->get_future();
+        }
+
+        // 用控制块记录循环索引
+        struct LoopContext {
+            int idx{0};
+            int max_times;
+            std::function<void()> schedule_next;
+            std::function<void()> current_cancel_fn;
+        };
+        auto loop = std::make_shared<LoopContext>(LoopContext{0, times});
+
+        loop->schedule_next = [this, interval_sec, task = std::move(task),
+                               promise, loop]() {
+            // 在安全事件循环中执行当次业务
+            task(loop->idx);
+            loop->idx++;
+
+            // 判断结束条件
+            if (loop->idx >= loop->max_times) {
+                promise->resolve();  // ✅ 循环结束，触发链式下一阶！
+                auto loop_copy = loop;
+                boost::asio::post(io_context_, [loop_copy]() {
+                    loop_copy->schedule_next = nullptr;
+                    loop_copy->current_cancel_fn = nullptr;
+                });
+            } else {
+                loop->current_cancel_fn =
+                    time_provider_->set_timeout(interval_sec, [this, loop]() {
+                        boost::asio::post(io_context_,
+                                          [loop]() { loop->schedule_next(); });
+                    });
+            }
+        };
+
+        // 启动第一波
+        boost::asio::post(io_context_, [loop]() { loop->schedule_next(); });
+
+        return promise->get_future();
+    }
+
     // For non-void ReturnType
     template <typename ReturnType,
               std::enable_if_t<!std::is_same<ReturnType, void>::value, int> = 0>
