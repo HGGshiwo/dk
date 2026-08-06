@@ -38,7 +38,7 @@ struct WsOpenEvent {
     std::shared_ptr<WsConnection> conn;
 };
 
-inline uint MAX_LOG_LENGTH = 500;  // 最多记录500个字符
+inline const uint MAX_LOG_LENGTH = 500;  // 最多记录500个字符
 
 template <typename Context, typename DerivedEngine>
 class WebAdapter : public BaseAdapter<Context, DerivedEngine> {

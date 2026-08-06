@@ -5,11 +5,14 @@
 // 1. 头文件隔离
 #ifdef USE_ROS1
 #include <ros/ros.h>
+#include <std_msgs/String.h>
 
 #include <boost/shared_ptr.hpp>
 #elif defined(USE_ROS2)
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/string.hpp>
 #endif
+#include <spdlog/spdlog.h>
 
 #include <memory>
 #include <string>
@@ -20,6 +23,13 @@
 #include "dk/adapters/base.hpp"
 
 namespace dk {
+
+#ifdef USE_ROS1
+using DefaultStringMsg = std_msgs::String;
+#elif defined(USE_ROS2)
+using DefaultStringMsg = std_msgs::msg::String;
+#endif
+
 template <typename Context, typename EngineType>
 class RosAdapter : public dk::BaseAdapter<Context, EngineType> {
    private:
@@ -130,6 +140,54 @@ class RosAdapter : public dk::BaseAdapter<Context, EngineType> {
              translator = std::forward<Callable>(translator)](ArgType msg) {
                 ReturnType e = translator(msg);
                 this->engine_->dispatch(e);
+            });
+        subs_.push_back(sub);
+#endif
+    }
+
+    /*
+    ## 将 JSON 格式的 rostopic 消息直接转为事件并触发，使用示例：
+    ```
+    bind_json_event<TakeoffEvent>(
+        "/vehicle/takeoff"                  // 参数 1: ROS Topic 名字
+    );
+    ```
+    */
+    template <typename SpecificEvent, typename MsgType = DefaultStringMsg>
+    void bind_json_event(
+        const std::string& topic_name,
+        std::function<void(SpecificEvent& e)> post_processor =
+            [](SpecificEvent& e) {}) {
+#ifdef USE_ROS1
+        auto sub = nh_.subscribe<MsgType>(
+            topic_name, 10,
+            [this, post_processor = std::move(post_processor),
+             topic_name](const typename MsgType::ConstPtr& msg) {
+                try {
+                    SpecificEvent event =
+                        json::parse(msg->data).template get<SpecificEvent>();
+                    post_processor(event);
+                    this->engine_->dispatch(event);
+                } catch (const std::exception& e) {
+                    spdlog::error("Failed to parse json event from {}: {}",
+                                  topic_name, e.what());
+                }
+            });
+        subs_.push_back(sub);
+#elif defined(USE_ROS2)
+        auto sub = node_->create_subscription<MsgType>(
+            topic_name, 10,
+            [this, post_processor = std::move(post_processor),
+             topic_name](const std::shared_ptr<const MsgType> msg) {
+                try {
+                    SpecificEvent event =
+                        json::parse(msg->data).template get<SpecificEvent>();
+                    post_processor(event);
+                    this->engine_->dispatch(event);
+                } catch (const std::exception& e) {
+                    spdlog::error("Failed to parse json event from {}: {}",
+                                  topic_name, e.what());
+                }
             });
         subs_.push_back(sub);
 #endif

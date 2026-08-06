@@ -64,6 +64,7 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
   const [mode, setMode] = useState<"waypoint" | "follow">("waypoint");
   const [showWaypointPanel, setShowWaypointPanel] = useState(false); // 控制航点面板显示
   const [showJoystick, setShowJoystick] = useState(false); // 控制虚拟摇杆显示
+  const [coordinateType, setCoordinateType] = useState<"gps" | "local">("gps");
   const joystickState = useRef({ x: 0, y: 0, z: 0, w: 0 });
 
   useEffect(() => {
@@ -142,13 +143,43 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
 
   // 从后端数据派生显示的航点
   const backendWaypoints = React.useMemo<Waypoint[]>(() => {
-    return ((mission_data as WaypointData[]) || []).map((wp, idx) => ({
-      id: `backend-wp-${idx}`,
-      lat: wp.lat,
-      lon: wp.lon,
-      height: wp.alt,
-    }));
-  }, [mission_data]);
+    return ((mission_data as WaypointData[]) || []).map((wp, idx) => {
+      // 如果后端发送的是GPS数据但前端选择局部坐标系，转换为局部坐标
+      if (coordinateType === "local" && (Math.abs(wp.lon) > 10 || Math.abs(wp.lat) > 10)) {
+        const origin = originRef.current;
+        const world = {
+          x: (wp.lon - origin.lon) * METERS_PER_DEGREE_LON(origin.lat),
+          y: (wp.lat - origin.lat) * METERS_PER_DEGREE_LAT,
+        };
+        return {
+          id: `backend-wp-${idx}`,
+          lat: world.y,
+          lon: world.x,
+          height: wp.alt,
+        };
+      }
+      // 如果后端发送的是局部坐标但前端选择GPS坐标系，转换为GPS
+      if (coordinateType === "gps" && Math.abs(wp.lon) < 1000 && Math.abs(wp.lat) < 1000) {
+        const origin = originRef.current;
+        const latLon = {
+          lon: wp.lon / METERS_PER_DEGREE_LON(origin.lat) + origin.lon,
+          lat: wp.lat / METERS_PER_DEGREE_LAT + origin.lat,
+        };
+        return {
+          id: `backend-wp-${idx}`,
+          lat: latLon.lat,
+          lon: latLon.lon,
+          height: wp.alt,
+        };
+      }
+      return {
+        id: `backend-wp-${idx}`,
+        lat: wp.lat,
+        lon: wp.lon,
+        height: wp.alt,
+      };
+    });
+  }, [mission_data, coordinateType, originRef]);
 
   // 监听面板关闭：如果关闭面板，则强制退出编辑状态，丢弃未提交的修改
   useEffect(() => {
@@ -187,18 +218,48 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
   useEffect(() => {
     if (!isEditing) {
       const newWaypoints = ((mission_data as WaypointData[]) || []).map(
-        (wp, idx) => ({
-          id: `wp-${Date.now()}-${idx}-${Math.random()}`,
-          lat: wp.lat,
-          lon: wp.lon,
-          height: wp.alt,
-        }),
+        (wp, idx) => {
+          // 如果后端发送的是GPS数据但前端选择局部坐标系，转换为局部坐标
+          if (coordinateType === "local" && (Math.abs(wp.lon) > 10 || Math.abs(wp.lat) > 10)) {
+            const origin = originRef.current;
+            const world = {
+              x: (wp.lon - origin.lon) * METERS_PER_DEGREE_LON(origin.lat),
+              y: (wp.lat - origin.lat) * METERS_PER_DEGREE_LAT,
+            };
+            return {
+              id: `wp-${Date.now()}-${idx}-${Math.random()}`,
+              lat: world.y,
+              lon: world.x,
+              height: wp.alt,
+            };
+          }
+          // 如果后端发送的是局部坐标但前端选择GPS坐标系，转换为GPS
+          if (coordinateType === "gps" && Math.abs(wp.lon) < 1000 && Math.abs(wp.lat) < 1000) {
+            const origin = originRef.current;
+            const latLon = {
+              lon: wp.lon / METERS_PER_DEGREE_LON(origin.lat) + origin.lon,
+              lat: wp.lat / METERS_PER_DEGREE_LAT + origin.lat,
+            };
+            return {
+              id: `wp-${Date.now()}-${idx}-${Math.random()}`,
+              lat: latLon.lat,
+              lon: latLon.lon,
+              height: wp.alt,
+            };
+          }
+          return {
+            id: `wp-${Date.now()}-${idx}-${Math.random()}`,
+            lat: wp.lat,
+            lon: wp.lon,
+            height: wp.alt,
+          };
+        },
       );
       setWaypoints(newWaypoints);
       // 清空历史记录栈并设为同步后的初始状态
       historyRef.current = { undoStack: [newWaypoints], redoStack: [] };
     }
-  }, [mission_data, isEditing]);
+  }, [mission_data, isEditing, coordinateType, originRef]);
 
   // 决定当前显示的数据流
   const displayWaypoints = isEditing ? waypoints : backendWaypoints;
@@ -221,6 +282,9 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
 
   const latLonToWorld = useCallback(
     (lat: number, lon: number): Point => {
+      if (coordinateType === "local") {
+        return { x: lon, y: lat };
+      }
       const origin = originRef.current;
       if (!origin) return { x: 0, y: 0 };
       return {
@@ -228,11 +292,14 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
         y: (lat - origin.lat) * METERS_PER_DEGREE_LAT,
       };
     },
-    [originRef],
+    [originRef, coordinateType],
   );
 
   const worldToLatLon = useCallback(
     (worldX: number, worldY: number): { lat: number; lon: number } => {
+      if (coordinateType === "local") {
+        return { lat: worldY, lon: worldX };
+      }
       const origin = originRef.current;
       if (!origin) return { lat: 0, lon: 0 };
       return {
@@ -240,8 +307,46 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
         lat: worldY / METERS_PER_DEGREE_LAT + origin.lat,
       };
     },
-    [originRef],
+    [originRef, coordinateType],
   );
+
+  const handleCoordinateTypeChange = useCallback((type: "gps" | "local") => {
+    setCoordinateType(type);
+    if (type === "local") {
+      setWaypoints((prev) =>
+        prev.map((wp) => {
+          const origin = originRef.current;
+          const x = (wp.lon - origin.lon) * METERS_PER_DEGREE_LON(origin.lat);
+          const y = (wp.lat - origin.lat) * METERS_PER_DEGREE_LAT;
+          return { ...wp, lon: x, lat: y };
+        })
+      );
+    } else {
+      setWaypoints((prev) =>
+        prev.map((wp) => {
+          const origin = originRef.current;
+          const lon = wp.lon / METERS_PER_DEGREE_LON(origin.lat) + origin.lon;
+          const lat = wp.lat / METERS_PER_DEGREE_LAT + origin.lat;
+          return { ...wp, lon, lat };
+        })
+      );
+    }
+  }, [originRef]);
+
+  const hasAutoDetected = useRef(false);
+  useEffect(() => {
+    if (hasAutoDetected.current || isLoading) return;
+    const { lat, lon, pos_enu } = useAppStore.getState().stateData;
+    if (lat != null && lon != null && (lat !== 0 || lon !== 0)) {
+      if (Math.abs(lat as number) > 1 || Math.abs(lon as number) > 1) {
+        setCoordinateType("gps");
+        hasAutoDetected.current = true;
+      }
+    } else if (pos_enu != null) {
+      setCoordinateType("local");
+      hasAutoDetected.current = true;
+    }
+  }, [isLoading]);
 
   const worldToCanvas = (worldX: number, worldY: number) => {
     const canvas = canvasRef.current;
@@ -332,14 +437,23 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
     const lon = useAppStore.getState().stateData.lon || 0;
     const lat = useAppStore.getState().stateData.lat || 0;
     const yaw = useAppStore.getState().stateData.yaw || 0;
+    const pos_enu = useAppStore.getState().stateData.pos_enu as number[] | undefined;
 
     const currentPoint = {
-      x:
-        ((lon as number) - originRef.current.lon) *
-        METERS_PER_DEGREE_LON(originRef.current.lat),
-      y: ((lat as number) - originRef.current.lat) * METERS_PER_DEGREE_LAT,
+      x: 0,
+      y: 0,
       yaw: yaw as number,
     };
+
+    if (coordinateType === "local") {
+      currentPoint.x = pos_enu?.[0] ?? 0;
+      currentPoint.y = pos_enu?.[1] ?? 0;
+    } else {
+      currentPoint.x =
+        ((lon as number) - originRef.current.lon) *
+        METERS_PER_DEGREE_LON(originRef.current.lat);
+      currentPoint.y = ((lat as number) - originRef.current.lat) * METERS_PER_DEGREE_LAT;
+    }
 
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -486,6 +600,7 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
     followState.startPoint,
     followState.currentMousePoint,
     latLonToWorld,
+    coordinateType,
   ]);
 
   useEffect(() => {
@@ -701,7 +816,9 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
               const originLon = origin?.lon || 0;
 
               if (prev.length == 0) {
-                curWP = [createWp(originLat, originLon)];
+                const startLat = coordinateType === "local" ? 0 : originLat;
+                const startLon = coordinateType === "local" ? 0 : originLon;
+                curWP = [createWp(startLat, startLon)];
               }
 
               const newLatLon = worldToLatLon(worldPos.x, worldPos.y);
@@ -736,6 +853,7 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
       worldToLatLon,
       followState.isDrawing,
       showWaypointPanel,
+      coordinateType,
     ],
   );
 
@@ -840,14 +958,17 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
       return;
     }
     const data = waypoints.map((wp) => [wp.lon, wp.lat, wp.height]);
-    httpRequest("POST", waypointSubmitUrl, { waypoint: data })
+    httpRequest("POST", waypointSubmitUrl, {
+      waypoint: data,
+      local: coordinateType === "local"
+    })
       .then(() => {
         message.success("航点提交成功");
         setIsEditing(false);
         setShowWaypointPanel(false);
       })
       .catch(() => message.error("航点提交失败"));
-  }, [waypoints, waypointSubmitUrl]);
+  }, [waypoints, waypointSubmitUrl, coordinateType]);
 
   const moveWaypoint = (index: number, direction: "up" | "down") => {
     setIsEditing(true);
@@ -873,16 +994,16 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
       width: 60,
     },
     {
-      title: "经度",
+      title: coordinateType === "local" ? "X坐标 (米)" : "经度",
       dataIndex: "lon",
       key: "lon",
-      render: (val: number) => val.toFixed(6),
+      render: (val: number) => val.toFixed(coordinateType === "local" ? 2 : 6),
     },
     {
-      title: "纬度",
+      title: coordinateType === "local" ? "Y坐标 (米)" : "纬度",
       dataIndex: "lat",
       key: "lat",
-      render: (val: number) => val.toFixed(6),
+      render: (val: number) => val.toFixed(coordinateType === "local" ? 2 : 6),
     },
     {
       title: "高度",
@@ -982,12 +1103,19 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
 
   const btnRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
-    btnRef.current?.addEventListener("click", () => {
+    const handleReset = () => {
       const { lat, lon } = useAppStore.getState().stateData;
-      if (lat != null && lon != null) {
+      if (coordinateType === "gps") {
+        if (lat != null && lon != null) {
+          originRef.current = {
+            lat: lat as number,
+            lon: lon as number,
+          };
+        }
+      } else {
         originRef.current = {
-          lat: lat as number,
-          lon: lon as number,
+          lat: 0,
+          lon: 0,
         };
       }
       viewRef.current = {
@@ -996,8 +1124,14 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
         scale: DEFAULT_SCALE,
       };
       requestRedraw();
-    });
-  }, [originRef, requestRedraw]);
+    };
+
+    const btn = btnRef.current;
+    btn?.addEventListener("click", handleReset);
+    return () => {
+      btn?.removeEventListener("click", handleReset);
+    };
+  }, [originRef, requestRedraw, coordinateType]);
 
   return (
     <div className="waypoint-editor-fullscreen" ref={containerRef}>
@@ -1107,7 +1241,7 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
           padding: '16px',
           overflowY: 'auto'
         }}>
-          <div className="mode-switch" style={{ marginBottom: '16px' }}>
+          <div className="mode-switch" style={{ marginBottom: '16px', display: 'flex', gap: '16px' }}>
             <Radio.Group
               value={mode}
               onChange={(e) => handleModeChange(e.target.value)}
@@ -1115,6 +1249,15 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
             >
               <Radio.Button value="waypoint">航点模式</Radio.Button>
               <Radio.Button value="follow">跟随模式</Radio.Button>
+            </Radio.Group>
+
+            <Radio.Group
+              value={coordinateType}
+              onChange={(e) => handleCoordinateTypeChange(e.target.value)}
+              buttonStyle="solid"
+            >
+              <Radio.Button value="gps">GPS坐标系</Radio.Button>
+              <Radio.Button value="local">局部坐标系</Radio.Button>
             </Radio.Group>
           </div>
 
