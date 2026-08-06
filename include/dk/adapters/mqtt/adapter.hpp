@@ -206,6 +206,34 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
         }
     }
 
+
+    // 1. 去除 MQTT 扩展订阅前缀，提取真实业务主题
+    static std::string normalize_topic(const std::string& topic) {
+        // 处理 $exclusive/xxx -> xxx
+        const std::string exclusive_prefix = "$exclusive/";
+        if (topic.rfind(exclusive_prefix, 0) == 0) {
+            return topic.substr(exclusive_prefix.length());
+        }
+
+        // 兼容处理共享订阅 $share/group_name/xxx -> xxx
+        const std::string share_prefix = "$share/";
+        if (topic.rfind(share_prefix, 0) == 0) {
+            size_t second_slash = topic.find('/', share_prefix.length());
+            if (second_slash != std::string::npos) {
+                return topic.substr(second_slash + 1);
+            }
+        }
+
+        // 处理队列订阅 $queue/xxx -> xxx
+        const std::string queue_prefix = "$queue/";
+        if (topic.rfind(queue_prefix, 0) == 0) {
+            return topic.substr(queue_prefix.length());
+        }
+
+        return topic; // 没有特殊前缀，原样返回
+    }
+
+
     void on_message(const std::string& topic, const std::string& payload,
                     int qos, const std::string& response_topic,
                     const std::string& correlation_data) {
@@ -303,10 +331,11 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
     // --- 注册处理函数 ---
     void register_handler(const std::string& topic,
                           std::shared_ptr<IMqttProtocolHandler> handler) {
-        routes_[topic] = std::move(handler);
+        std::string normalized_topic = normalize_topic(topic);
+        routes_[normalized_topic] = std::move(handler);
         if (is_connected_ && client_) {
             try {
-                client_->subscribe(topic, routes_[topic]->qos);
+                client_->subscribe(topic, routes_[normalized_topic]->qos);
             } catch (...) {
             }
         }
