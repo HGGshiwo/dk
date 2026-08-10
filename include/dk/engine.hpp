@@ -4,6 +4,7 @@
 #include <boost/asio.hpp>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <exception>
 #include <functional>
 #include <future>
@@ -126,6 +127,8 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
 
     size_t build_depth_ = 0;
     bool divergence_found_ = false;
+    bool build_aborted_ = false;
+    uint64_t build_entry_plan_version_ = 0;
 
     // 当次跳转的重入控制
     bool current_force_full_reentry_ = false;
@@ -175,6 +178,18 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
         : io_context_(io), time_provider_(std::move(time_provider)) {}
 
     // IStatePathBuilder 接口实现（含生命周期事件派发）
+    Context& context() override { return ctx_; }
+    void abort_build() override { build_aborted_ = true; }
+    bool is_build_aborted() const override { return build_aborted_; }
+    bool is_plan_modified() const override {
+        return plan_manager_.version() != build_entry_plan_version_;
+    }
+    void apply_plan(std::shared_ptr<typename StateAction<Context>::IPlanHolder>
+                        holder) override {
+        if (holder) {
+            holder->run(&this->plan(), this->ctx_);
+        }
+    }
     size_t get_memory_mark() const override { return current_offset_; }
     void* allocate_bytes(size_t size, size_t alignment) override {
         size_t aligned_offset =
@@ -228,9 +243,16 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
         active_path_[active_depth_] = {state, destroy_fn, original_offset};
         active_depth_++;
         build_depth_++;
-        StateAction<Context> enter_action = state->internal_enter(ctx_);
-        if (enter_action.type == StateAction<Context>::Type::TRANSITION) {
-            pending_transition_ = std::move(enter_action);
+
+        try {
+            StateAction<Context> enter_action = state->internal_enter(ctx_);
+            if (enter_action.type == StateAction<Context>::Type::TRANSITION ||
+                enter_action.type == StateAction<Context>::Type::NEXT) {
+                pending_transition_ = std::move(enter_action);
+            }
+        } catch (std::exception& ex) {
+            std::cout << "[Engeine] " << state->name()
+                      << " on_enter_error: " << ex.what() << std::endl;
         }
     }
 
@@ -238,12 +260,20 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
         if (active_depth_ == 0) return;
         auto& node = active_path_[active_depth_ - 1];
 
-        // 【生命周期】：触发 Exit 事件和回调
-        node.state->on_exit(ctx_);
-        if (node.destroy_fn) node.destroy_fn(node.state);  // 析构
+        ContextGuard(nullptr, [this, &node]() {
+            current_offset_ = node.mem_offset;  // 完美退还内存
+            active_depth_--;
+        });
 
-        current_offset_ = node.mem_offset;  // 完美退还内存
-        active_depth_--;
+        // 【生命周期】：触发 Exit 事件和回调
+        try {
+            node.state->on_exit(ctx_);
+            if (node.destroy_fn) node.destroy_fn(node.state);  // 析构
+        } catch (const std::exception& e) {
+            std::cout << "[Engine]: on_exit " << node.state->name()
+                      << " error: " << e.what() << std::endl;
+            throw;  // 继续抛出异常，交给上层处理
+        }
     }
 
     // 核心：极度简化的状态跳转控制循环
@@ -257,6 +287,8 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
             StepLevelGuard guard(step_call_level_);
             while (action.path_builder) {
                 pending_transition_.reset();
+                build_aborted_ = false;
+                build_entry_plan_version_ = plan_manager_.version();
 
                 std::string prev_leaf = get_state_name();
                 int prev_leaf_id = get_state_id();
@@ -273,21 +305,47 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
                 // 【魔法时刻】：一行代码自动完成 LCA 比对、旧状态 Pop
                 // 退栈、新状态 Push 入栈
                 action.path_builder(*this);
+
+                if (build_aborted_) {
+                    // before_enter 返回 false：拒绝进入，保持在原状态
+                    plan_manager_.cancel_execution();
+                    break;
+                }
+
+                if (plan_manager_.version() != build_entry_plan_version_) {
+                    // before_enter 期间修改了 plan（例如 push_front 了
+                    // ArmState） 当前状态暂不进入，驱动 plan
+                    // 重新执行新的队头任务
+                    plan_manager_.cancel_execution();
+                    this->plan().advance();
+                    if (pending_transition_.has_value()) {
+                        action = std::move(*pending_transition_);
+                        continue;
+                    }
+                    break;
+                }
+
+                // 队头未变且通过校验，正式提交出队
+                plan_manager_.commit_front(build_entry_plan_version_);
+
                 // 如果新路径比旧路径短，把多余的尾巴截断退出
                 while (active_depth_ > build_depth_) {
                     pop_state();
                 }
+
+                if (pending_transition_.has_value()) {
+                    action = std::move(*pending_transition_);
+                    continue;
+                }
+
                 std::string next_leaf = get_state_name();
                 int next_leaf_id = get_state_id();
                 process_internal(EventBox(StateChangeEvent{
                     prev_leaf, next_leaf, prev_leaf_id, next_leaf_id}));
-                if (pending_transition_.has_value()) {
-                    // 如果在上述的 pop_state(on_exit) 或
-                    // push_new_state(on_enter) 中发生了新的跳转
-                    action = std::move(*pending_transition_);
-                } else {
-                    break;  // 跳转彻底结束
-                }
+                break;
+            }
+            if (action.type == StateAction<Context>::Type::NEXT) {
+                this->plan().advance();
             }
         } catch (const std::exception& e) {
             // step_call_level_ = 0;
@@ -376,7 +434,8 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
                     StateAction<Context> action =
                         active_path_[i].state->internal_tick(dt, ctx_);
 
-                    if (action.type == StateAction<Context>::Type::TRANSITION) {
+                    if (action.type == StateAction<Context>::Type::TRANSITION ||
+                        action.type == StateAction<Context>::Type::NEXT) {
                         final_transition = action;
                         break;
                     } else if (pending_transition_.has_value()) {
@@ -398,6 +457,8 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
         // 安全地在循环外执行状态跳转
         if (final_transition.type == StateAction<Context>::Type::TRANSITION) {
             this->execute_transition(final_transition);
+        } else if (final_transition.type == StateAction<Context>::Type::NEXT) {
+            this->plan().advance();
         }
     }
 
@@ -471,6 +532,146 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
         this->step_internal(action);
     }
 
+    using StepTask = std::function<StateAction<Context>(Context&)>;
+
+    class PlanManager {
+       private:
+        IEngine& engine_;
+        std::deque<StepTask> queue_;
+        std::optional<StepTask> fallback_task_;
+        uint64_t version_ = 0;
+        bool executing_plan_head_ = false;
+
+       public:
+        PlanManager(IEngine& e) : engine_(e) {}
+
+        uint64_t version() const { return version_; }
+
+        PlanManager& pop_front() {
+            if (!queue_.empty()) {
+                queue_.pop_front();
+                version_++;
+            }
+            return *this;
+        }
+
+        // push_back 静态状态 (支持任意参数)
+        template <typename TargetState, typename... Args>
+        PlanManager& push_back(Args&&... args) {
+            version_++;
+            auto args_tuple = std::make_tuple(std::forward<Args>(args)...);
+            queue_.push_back([args_tuple](Context& c) {
+                return std::apply(
+                    [](auto&&... unpacked) {
+                        return StateAction<Context>::template step<TargetState>(
+                            unpacked...);
+                    },
+                    args_tuple);
+            });
+            return *this;
+        }
+
+        // push_back 动态回调
+        PlanManager& push_back(StepTask task) {
+            version_++;
+            queue_.push_back(std::move(task));
+            return *this;
+        }
+
+        // push_front 静态状态
+        template <typename TargetState, typename... Args>
+        PlanManager& push_front(Args&&... args) {
+            version_++;
+            auto args_tuple = std::make_tuple(std::forward<Args>(args)...);
+            queue_.push_front([args_tuple](Context& c) {
+                return std::apply(
+                    [](auto&&... unpacked) {
+                        return StateAction<Context>::template step<TargetState>(
+                            unpacked...);
+                    },
+                    args_tuple);
+            });
+            return *this;
+        }
+
+        // push_front 动态回调
+        PlanManager& push_front(StepTask task) {
+            version_++;
+            queue_.push_front(std::move(task));
+            return *this;
+        }
+
+        // fallback 静态状态
+        template <typename TargetState, typename... Args>
+        PlanManager& fallback(Args&&... args) {
+            auto args_tuple = std::make_tuple(std::forward<Args>(args)...);
+            fallback_task_ = [args_tuple](Context& c) {
+                return std::apply(
+                    [](auto&&... unpacked) {
+                        return StateAction<Context>::template step<TargetState>(
+                            unpacked...);
+                    },
+                    args_tuple);
+            };
+            return *this;
+        }
+
+        // fallback 动态回调
+        PlanManager& fallback(StepTask task) {
+            fallback_task_ = std::move(task);
+            return *this;
+        }
+
+        PlanManager& clear() {
+            version_++;
+            queue_.clear();
+            fallback_task_.reset();
+            return *this;
+        }
+
+        bool empty() const { return queue_.empty(); }
+        size_t size() const { return queue_.size(); }
+
+        void start() { advance(); }
+
+        void advance() {
+            if (!queue_.empty()) {
+                auto current_task = queue_.front();
+                executing_plan_head_ = true;
+                StateAction<Context> act = current_task(engine_.ctx_);
+                if (act.type == StateAction<Context>::Type::TRANSITION) {
+                    engine_.execute_transition(act);
+                } else if (act.type == StateAction<Context>::Type::NEXT) {
+                    pop_front();
+                    advance();
+                }
+            } else if (fallback_task_.has_value()) {
+                executing_plan_head_ = false;
+                StateAction<Context> act = (*fallback_task_)(engine_.ctx_);
+                if (act.type == StateAction<Context>::Type::TRANSITION) {
+                    engine_.execute_transition(act);
+                }
+            }
+        }
+
+        void commit_front(uint64_t expected_version) {
+            if (executing_plan_head_ && !queue_.empty() &&
+                version_ == expected_version) {
+                queue_.pop_front();
+                version_++;
+            }
+            executing_plan_head_ = false;
+        }
+
+        void cancel_execution() { executing_plan_head_ = false; }
+    };
+
+    PlanManager& plan() { return plan_manager_; }
+
+   protected:
+    PlanManager plan_manager_{*this};
+
+   public:
     const std::vector<IState<Context>*> get_active_states_view() const {
         std::vector<IState<Context>*> view;
         view.reserve(active_depth_);
@@ -848,8 +1049,7 @@ class BaseEngine
     // 使用子类类型作为模板参数，因为用到handle_event
     void process_internal(const EventBox& e) {
         // 开启事件处理周期的统一防护
-        StateAction<Context> final_transition =
-            StateAction<Context>::unhandled();
+        std::optional<StateAction<Context>> final_transition;
         {
             StepLevelGuard event_guard(this->step_call_level_);
             // 1. 触发 Wait 系统
@@ -874,34 +1074,81 @@ class BaseEngine
             for (auto& listener : this->listeners_) {
                 if (this->pending_transition_.has_value())
                     break;  // 【短路优化】一旦发生跳转，立刻中止后续派发
-                listener->handle_event(e, this->ctx_);
+                try {
+                    StateAction<Context> act =
+                        listener->handle_event(e, this->ctx_);
+                    if (act.type == StateAction<Context>::Type::TRANSITION ||
+                        act.type == StateAction<Context>::Type::NEXT) {
+                        final_transition = act;
+                        break;
+                    } else if (act.type == StateAction<Context>::Type::PLAN) {
+                        if (act.plan_holder) {
+                            act.plan_holder->run(&this->plan(), this->ctx_);
+                            this->plan().advance();
+                        }
+                        break;
+                    } else if (act.type ==
+                               StateAction<Context>::Type::HANDLED) {
+                        break;
+                    }
+                } catch (const std::exception& ex) {
+                    std::cout << "[Engine]: listener handle_event error: "
+                              << ex.what() << std::endl;
+                    throw;
+                }
             }
 
             // 3. 触发引擎自身的拦截
-            if (!this->pending_transition_.has_value()) {
-                this->handle_event(e, this->ctx_);
+            if (!this->pending_transition_.has_value() &&
+                !final_transition.has_value()) {
+                try {
+                    this->handle_event(e, this->ctx_);
+                } catch (const std::exception& ex) {
+                    std::cout
+                        << "[Engine]: engine handle_event error: " << ex.what()
+                        << std::endl;
+                    throw;
+                }
             }
 
             // 4. HSM 事件冒泡核心
-            if (!this->pending_transition_.has_value()) {
+            if (!this->pending_transition_.has_value() &&
+                !final_transition.has_value()) {
                 for (int i = this->active_depth_ - 1; i >= 0; --i) {
-                    StateAction<Context> action =
-                        this->active_path_[i].state->handle_event(e,
-                                                                  this->ctx_);
+                    try {
+                        StateAction<Context> action =
+                            this->active_path_[i].state->handle_event(
+                                e, this->ctx_);
 
-                    // 优先处理 return StateAction::step() 的正规跳转
-                    if (action.type == StateAction<Context>::Type::TRANSITION) {
-                        final_transition = action;
-                        break;
-                    }
-                    // 拦截到了内部强行调用 engine->step() 产生的缓存跳转
-                    else if (this->pending_transition_.has_value()) {
-                        break;
-                    }
-                    // 事件被拦截吸收
-                    else if (action.type ==
-                             StateAction<Context>::Type::HANDLED) {
-                        break;
+                        // 优先处理 return StateAction::step() 的正规跳转
+                        if (action.type ==
+                                StateAction<Context>::Type::TRANSITION ||
+                            action.type == StateAction<Context>::Type::NEXT) {
+                            final_transition = action;
+                            break;
+                        } else if (action.type ==
+                                   StateAction<Context>::Type::PLAN) {
+                            if (action.plan_holder) {
+                                action.plan_holder->run(&this->plan(),
+                                                        this->ctx_);
+                                this->plan().advance();
+                            }
+                            break;
+                        }
+                        // 拦截到了内部强行调用 engine->step() 产生的缓存跳转
+                        else if (this->pending_transition_.has_value()) {
+                            break;
+                        }
+                        // 事件被拦截吸收
+                        else if (action.type ==
+                                 StateAction<Context>::Type::HANDLED) {
+                            break;
+                        }
+                    } catch (std::exception& ex) {
+                        std::cout << "[Engine] state "
+                                  << this->active_path_[i].state->name()
+                                  << " handle event error: " << ex.what()
+                                  << std::endl;
                     }
                 }
             }
@@ -916,8 +1163,14 @@ class BaseEngine
         }  // 【护盾解除】：离开作用域，step_call_level_ 恢复为 0
 
         // 如果最终决议需要发生跳转，在这里绝对安全地执行！
-        if (final_transition.type == StateAction<Context>::Type::TRANSITION) {
-            this->execute_transition(final_transition);
+        if (final_transition.has_value()) {
+            if (final_transition->type ==
+                StateAction<Context>::Type::TRANSITION) {
+                this->execute_transition(*final_transition);
+            } else if (final_transition->type ==
+                       StateAction<Context>::Type::NEXT) {
+                this->plan().advance();
+            }
         }
     }
 
@@ -978,5 +1231,30 @@ class BaseEngine
         return future;
     }
 };
+
+template <typename Context>
+template <typename Func>
+StateAction<Context> StateAction<Context>::plan(Func&& func) {
+    StateAction<Context> act{Type::PLAN, nullptr};
+    using EngineType = IEngine<Context>;
+    using PlanType = typename EngineType::PlanManager;
+    struct ConcreteHolder : public IPlanHolder {
+        std::decay_t<Func> f;
+        ConcreteHolder(Func&& fn) : f(std::forward<Func>(fn)) {}
+        void run(void* plan_ptr, Context& ctx) override {
+            auto* p = static_cast<PlanType*>(plan_ptr);
+            if constexpr (std::is_invocable_v<std::decay_t<Func>, PlanType&,
+                                              Context&>) {
+                f(*p, ctx);
+            } else if constexpr (std::is_invocable_v<std::decay_t<Func>,
+                                                     PlanType&>) {
+                f(*p);
+            }
+        }
+    };
+    act.plan_holder =
+        std::make_shared<ConcreteHolder>(std::forward<Func>(func));
+    return act;
+}
 
 }  // namespace dk

@@ -206,7 +206,6 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
         }
     }
 
-
     // 1. 去除 MQTT 扩展订阅前缀，提取真实业务主题
     static std::string normalize_topic(const std::string& topic) {
         // 处理 $exclusive/xxx -> xxx
@@ -230,9 +229,8 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
             return topic.substr(queue_prefix.length());
         }
 
-        return topic; // 没有特殊前缀，原样返回
+        return topic;  // 没有特殊前缀，原样返回
     }
-
 
     void on_message(const std::string& topic, const std::string& payload,
                     int qos, const std::string& response_topic,

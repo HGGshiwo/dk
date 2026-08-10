@@ -1,6 +1,7 @@
 #pragma once
 #include <boost/smart_ptr/shared_ptr.hpp>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -170,6 +171,20 @@ class TimeTracker {
     }
 
     double get_elapsed_time() const { return elapsed_time_; }
+};
+
+class ContextGuard {
+    ContextGuard(const ContextGuard&) = delete;
+    std::function<void()> exit_fn_ = nullptr;
+
+   public:
+    ContextGuard(std::function<void()> enter_fn, std::function<void()> exit_fn)
+        : exit_fn_(std::move(exit_fn)) {
+        if (enter_fn) enter_fn();
+    }
+    ~ContextGuard() {
+        if (exit_fn_) exit_fn_();
+    }
 };
 
 }  // namespace dk

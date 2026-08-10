@@ -108,10 +108,20 @@ struct CastTargetType<Tmpl<Args...>> {
 // 前置声明
 template <typename Context>
 class IState;
+
+template <typename Context>
+class StateAction;
+
 template <typename Context>
 class IStatePathBuilder {
    public:
     virtual ~IStatePathBuilder() = default;
+    virtual Context& context() = 0;
+    virtual void abort_build() = 0;
+    virtual bool is_build_aborted() const = 0;
+    virtual bool is_plan_modified() const = 0;
+    virtual void apply_plan(
+        std::shared_ptr<typename StateAction<Context>::IPlanHolder> holder) = 0;
     // 检查当前深度的状态是否可以复用
     virtual bool try_reuse(std::string_view state_name) = 0;
     // 获取当前内存分配游标
@@ -149,7 +159,7 @@ void call_parent_build_path(Builder& builder, const ArgsTuple& args_tuple,
 template <typename Context>
 class StateAction {
    public:
-    enum class Type { UNHANDLED, HANDLED, TRANSITION };
+    enum class Type { UNHANDLED, HANDLED, TRANSITION, NEXT, PLAN };
     Type type = Type::UNHANDLED;
     // 重点：签名大幅度简化
     std::function<void(IStatePathBuilder<Context>& builder)> path_builder;
@@ -158,8 +168,20 @@ class StateAction {
     // +++ 新增：类型擦除的断言函数 +++
     std::function<bool(IState<Context>*)> reentry_predicate;
 
+    // 类型擦除的 plan 闭包包装接口
+    struct IPlanHolder {
+        virtual ~IPlanHolder() = default;
+        virtual void run(void* plan_ptr, Context& ctx) = 0;
+    };
+    std::shared_ptr<IPlanHolder> plan_holder;
+
     static StateAction unhandled() { return {Type::UNHANDLED, nullptr}; }
     static StateAction handled() { return {Type::HANDLED, nullptr}; }
+    static StateAction next() { return {Type::NEXT, nullptr}; }
+
+    template <typename Func>
+    static StateAction plan(Func&& func);
+
     template <typename TargetState, typename... Tuples>
     static StateAction step(Tuples&&... tuples) {
         StateAction action{Type::TRANSITION, nullptr};
@@ -381,6 +403,38 @@ class PlayerState::Grounded : public BaseState<MyContext, Grounded, PlayerState>
 ```
 // 自动提取模板并继承！
 */
+template <typename T, typename Ctx, typename = void, typename... Args>
+struct has_static_before_enter : std::false_type {};
+
+template <typename T, typename Ctx, typename... Args>
+struct has_static_before_enter<
+    T, Ctx,
+    std::void_t<decltype(T::before_enter(std::declval<Ctx&>(),
+                                         std::declval<Args>()...))>,
+    Args...> : std::true_type {};
+
+template <typename T, typename Ctx, typename... Args>
+inline constexpr bool has_static_before_enter_v =
+    has_static_before_enter<T, Ctx, void, Args...>::value;
+
+template <typename T, typename Context, typename... Args>
+StateAction<Context> invoke_before_enter(Context& ctx, Args&&... args) {
+    if constexpr (has_static_before_enter_v<T, Context, Args...>) {
+        using Ret = decltype(T::before_enter(ctx, std::forward<Args>(args)...));
+        if constexpr (std::is_same_v<Ret, StateAction<Context>>) {
+            return T::before_enter(ctx, std::forward<Args>(args)...);
+        } else if constexpr (std::is_convertible_v<Ret, bool>) {
+            bool ok = T::before_enter(ctx, std::forward<Args>(args)...);
+            return ok ? StateAction<Context>::handled()
+                      : StateAction<Context>::unhandled();
+        } else {
+            return StateAction<Context>::handled();
+        }
+    } else {
+        return StateAction<Context>::handled();
+    }
+}
+
 template <typename Context, typename Derived, typename Parent>
 class BaseState : public IEventHandler<IState<Context>, Context,
                                        StateAction<Context>, Derived>,
@@ -418,6 +472,8 @@ class BaseState : public IEventHandler<IState<Context>, Context,
             std::forward<Args>(args)...);
     }
 
+    StateAction<Context> next() { return StateAction<Context>::next(); }
+
     template <typename P = ParentState,
               typename = std::enable_if_t<!std::is_same_v<P, void>>>
     P* parent() {
@@ -427,6 +483,8 @@ class BaseState : public IEventHandler<IState<Context>, Context,
     template <typename... Tuples>
     static void build_path(IStatePathBuilder<Context>& builder,
                            const Tuples&... args) {
+        if (builder.is_build_aborted()) return;
+
         constexpr size_t NUM_ARGS = sizeof...(Tuples);
         auto args_tuple = std::tie(args...);
         // 1. 递归构建父状态
@@ -438,6 +496,7 @@ class BaseState : public IEventHandler<IState<Context>, Context,
             } else {
                 ParentState::build_path(builder);
             }
+            if (builder.is_build_aborted()) return;
         }
         // 2. 提取当前层级参数
         auto current_tuple = [&]() {
@@ -446,9 +505,34 @@ class BaseState : public IEventHandler<IState<Context>, Context,
             else
                 return std::tuple<>{};
         }();
-        // // 【修复重点】：提前在泛型 Lambda 外部提取好类型，避开 GCC 捕获推导
-        // Bug using CurrentTupleType = decltype(current_tuple);
-        // 3. 判断复用还是构造
+
+        // 3. 静态前置守卫检查 (before_enter)
+        StateAction<Context> guard_action = std::apply(
+            [&](auto&&... unpacked_args) {
+                return invoke_before_enter<Derived>(
+                    builder.context(),
+                    std::forward<decltype(unpacked_args)>(unpacked_args)...);
+            },
+            current_tuple);
+
+        if (guard_action.type == StateAction<Context>::Type::UNHANDLED) {
+            builder.abort_build();
+            return;
+        }
+
+        if (guard_action.type == StateAction<Context>::Type::PLAN) {
+            if (guard_action.plan_holder) {
+                builder.apply_plan(guard_action.plan_holder);
+            }
+            return;
+        }
+
+        if (builder.is_plan_modified()) {
+            // 队头发生变化（插队了新任务），当前状态暂不进入，直接退出构建
+            return;
+        }
+
+        // 4. 判断复用还是构造
         std::string_view my_name = Derived::static_name();
         if (builder.try_reuse(my_name)) {
             // 【命中缓存】：底层 Builder 内部会自动推进深度，什么都不用做

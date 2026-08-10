@@ -197,6 +197,10 @@ export const useVisualizerData = (_: boolean, isLocalMode: boolean, isPlaying: b
                 dataRef.current = dataRef.current.slice(1000);
             }
 
+            if (mergedDataRef.current.length > 50000) {
+                mergedDataRef.current = mergedDataRef.current.slice(mergedDataRef.current.length - 50000);
+            }
+
             // 根据 isPlaying 判定是否将时间轴向前推送
             if (isPlaying) {
                 lastTimeRef.current = time;

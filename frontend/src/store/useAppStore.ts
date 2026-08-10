@@ -15,7 +15,7 @@ type WsStatus = "connecting" | "open" | "closed" | "error";
 interface AppState {
   stateData: Record<
     string,
-    LogItemData[] | string | TableRowData | number | WaypointData[]
+    LogItemData[] | string | TableRowData | number | WaypointData[] | number[]
   >;
   wsStatus: WsStatus;
   modalVisible: boolean;
@@ -32,6 +32,9 @@ interface AppState {
   logboxVisible: boolean;
   setLogboxVisible: (visible: boolean) => void;
 }
+
+const MAX_LOG_ITEMS = 500;
+const MAX_FGLOG_CHUNKS = 10;
 
 let wsInstance: WebSocket | null = null;
 let reconnectTimer: number | null = null;
@@ -116,9 +119,21 @@ const handleFglog = (data: any) => {
       fglogBuffer = fglogBuffer.slice(1000);
       try {
         const countStr = localStorage.getItem("fglog_chunk_count") || "0";
-        const count = parseInt(countStr, 10);
-        localStorage.setItem(`fglog_chunk_${count}`, JSON.stringify(chunk));
-        localStorage.setItem("fglog_chunk_count", (count + 1).toString());
+        let count = parseInt(countStr, 10);
+        if (isNaN(count)) count = 0;
+
+        if (count >= MAX_FGLOG_CHUNKS) {
+          for (let i = 0; i < count - 1; i++) {
+            const nextVal = localStorage.getItem(`fglog_chunk_${i + 1}`);
+            if (nextVal !== null) {
+              localStorage.setItem(`fglog_chunk_${i}`, nextVal);
+            }
+          }
+          localStorage.setItem(`fglog_chunk_${count - 1}`, JSON.stringify(chunk));
+        } else {
+          localStorage.setItem(`fglog_chunk_${count}`, JSON.stringify(chunk));
+          localStorage.setItem("fglog_chunk_count", (count + 1).toString());
+        }
       } catch (e) {
         console.error("Failed to write chunk to localStorage:", e);
       }
@@ -126,13 +141,29 @@ const handleFglog = (data: any) => {
   }
   fglogHandlerRef.current?.(fglog);
   return true;
-}
+};
 
-const initWebSocket = () => {
+const cleanupWsInstance = () => {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
   if (wsInstance) {
-    wsInstance.close();
+    wsInstance.onopen = null;
+    wsInstance.onclose = null;
+    wsInstance.onerror = null;
+    wsInstance.onmessage = null;
+    try {
+      wsInstance.close();
+    } catch {
+      // ignore
+    }
     wsInstance = null;
   }
+};
+
+const initWebSocket = () => {
+  cleanupWsInstance();
 
   isManualClose = false;
   useAppStore.setState({ wsStatus: "connecting" });
@@ -143,7 +174,6 @@ const initWebSocket = () => {
     ws.onopen = () => {
       console.log("WebSocket连接成功");
       useAppStore.setState({ wsStatus: "open" });
-      // fglog_enable will be explicitly triggered by the user via the visualizer UI
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
@@ -152,6 +182,13 @@ const initWebSocket = () => {
 
     ws.onclose = (event) => {
       console.log("WebSocket连接关闭", event);
+      ws.onopen = null;
+      ws.onclose = null;
+      ws.onerror = null;
+      ws.onmessage = null;
+      if (wsInstance === ws) {
+        wsInstance = null;
+      }
       useAppStore.setState({ wsStatus: "closed" });
       if (!isManualClose) {
         scheduleReconnect();
@@ -161,9 +198,7 @@ const initWebSocket = () => {
     ws.onerror = (error) => {
       console.error("WebSocket连接错误", error);
       useAppStore.setState({ wsStatus: "error" });
-      if (!isManualClose) {
-        scheduleReconnect();
-      }
+      // onclose will follow and handle reconnection
     };
 
     ws.onmessage = (event) => {
@@ -196,12 +231,15 @@ const initWebSocket = () => {
             message.error(data?.error);
           }
           const currentList = (currentState[dataType] || []) as LogItemData[];
+          const nextList = currentList.length >= MAX_LOG_ITEMS
+            ? [...currentList.slice(currentList.length - MAX_LOG_ITEMS + 1), data]
+            : [...currentList, data];
           useAppStore.setState({
-            stateData: { ...currentState, [dataType]: [...currentList, data] },
+            stateData: { ...currentState, [dataType]: nextList },
           });
         }
         if (data.msg_id != undefined) {
-          ws.send(JSON.stringify({ msg_id: data.msg_id }))
+          ws.send(JSON.stringify({ msg_id: data.msg_id }));
         }
       } catch (error) {
         console.error("WS消息解析失败：", error);
@@ -300,14 +338,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
 export const cleanupWebSocket = () => {
   isManualClose = true;
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-  if (wsInstance) {
-    wsInstance.close();
-    wsInstance = null;
-  }
+  cleanupWsInstance();
 };
 
 export const sendWebSocketMessage = (message: any) => {
