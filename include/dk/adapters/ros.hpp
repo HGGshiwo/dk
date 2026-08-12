@@ -192,5 +192,64 @@ class RosAdapter : public dk::BaseAdapter<Context, EngineType> {
         subs_.push_back(sub);
 #endif
     }
+
+    /*
+    ## 将 JSON 格式的 rostopic 消息解析为 C++ 对象并同步到 Context，使用示例：
+    ```
+    bind_json_context<MyClass>(
+        "/vehicle/status",                  // 参数 1: ROS Topic 名字
+        [](const MyClass& data, Context& ctx) -> void { ctx.status = data; } //
+    参数 2: 回调函数
+    );
+    // 或者自动推导回调的第一个参数类型：
+    bind_json_context(
+        "/vehicle/status",
+        [](const MyClass& data, Context& ctx) -> void { ctx.status = data; }
+    );
+    ```
+    */
+    template <typename SpecificData, typename MsgType = DefaultStringMsg,
+              typename F>
+    void bind_json_context(const std::string& topic_name, F&& cb) {
+#ifdef USE_ROS1
+        auto sub = nh_.subscribe<MsgType>(
+            topic_name, 10,
+            [this, cb = std::forward<F>(cb),
+             topic_name](const typename MsgType::ConstPtr& msg) {
+                try {
+                    SpecificData data =
+                        json::parse(msg->data).template get<SpecificData>();
+                    cb(data, this->engine_->get_context());
+                } catch (const std::exception& e) {
+                    spdlog::error("Failed to parse json context from {}: {}",
+                                  topic_name, e.what());
+                }
+            });
+        subs_.push_back(sub);
+#elif defined(USE_ROS2)
+        auto sub = node_->create_subscription<MsgType>(
+            topic_name, 10,
+            [this, cb = std::forward<F>(cb),
+             topic_name](const std::shared_ptr<const MsgType> msg) {
+                try {
+                    SpecificData data =
+                        json::parse(msg->data).template get<SpecificData>();
+                    cb(data, this->engine_->get_context());
+                } catch (const std::exception& e) {
+                    spdlog::error("Failed to parse json context from {}: {}",
+                                  topic_name, e.what());
+                }
+            });
+        subs_.push_back(sub);
+#endif
+    }
+
+    template <typename F>
+    void bind_json_context(const std::string& topic_name, F&& cb) {
+        using Traits = meta_utils::callable_traits<decltype(cb)>;
+        using SpecificData = typename Traits::template arg_type<0>;
+        bind_json_context<SpecificData, DefaultStringMsg>(topic_name,
+                                                          std::forward<F>(cb));
+    }
 };
 }  // namespace dk
