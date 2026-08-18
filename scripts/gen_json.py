@@ -24,6 +24,7 @@ def scan_and_generate(scan_dir, output_file, json_include_path, namespace):
     generated_macros = []
     included_files = set()
     source_extensions = {".cpp", ".cc", ".cxx", ".c"}
+    has_eigen = False
 
     for file_path in scan_path.rglob("*.[hc]*"):
         try:
@@ -34,6 +35,9 @@ def scan_and_generate(scan_dir, output_file, json_include_path, namespace):
 
         if "@JSON_ENABLE" not in content:
             continue
+
+        if "Eigen" in content:
+            has_eigen = True
 
         if file_path.suffix.lower() in source_extensions:
             print(
@@ -157,6 +161,38 @@ inline void from_json(const nlohmann::json& j, {struct_name}& t) {{
 #ifndef AUTO_JSON_OPTIONAL_SERIALIZER_INJECTED
 #define AUTO_JSON_OPTIONAL_SERIALIZER_INJECTED
 namespace nlohmann {
+    template <typename T>
+    struct adl_serializer<std::optional<T>> {
+        static void to_json(json& j, const std::optional<T>& opt) {
+            if (opt.has_value()) {
+                j = *opt;
+            } else {
+                j = nullptr;
+            }
+        }
+        static void from_json(const json& j, std::optional<T>& opt) {
+            if (j.is_null()) {
+                opt = std::nullopt;
+            } else {
+                opt = j.get<T>();
+            }
+        }
+    };
+}
+#endif
+// =====================================================================
+"""
+    )
+
+    if has_eigen:
+        lines.append(
+            """
+// =====================================================================
+// 自动注入: 支持 Eigen 的 JSON 序列化器
+// =====================================================================
+#ifndef AUTO_JSON_EIGEN_SERIALIZER_INJECTED
+#define AUTO_JSON_EIGEN_SERIALIZER_INJECTED
+namespace nlohmann {
     template <>
     struct adl_serializer<Eigen::Matrix3d> {
         // 序列化：Matrix3d -> json (转换为长度为 9 的数组，按行优先)
@@ -201,29 +237,11 @@ namespace nlohmann {
             v.z() = j.at(2).get<double>();
         }
     };
-
-    template <typename T>
-    struct adl_serializer<std::optional<T>> {
-        static void to_json(json& j, const std::optional<T>& opt) {
-            if (opt.has_value()) {
-                j = *opt;
-            } else {
-                j = nullptr;
-            }
-        }
-        static void from_json(const json& j, std::optional<T>& opt) {
-            if (j.is_null()) {
-                opt = std::nullopt;
-            } else {
-                opt = j.get<T>();
-            }
-        }
-    };
 }
 #endif
 // =====================================================================
 """
-    )
+        )
 
     if namespace:
         lines.append(f"namespace {namespace} {{\n")

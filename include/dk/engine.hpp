@@ -115,7 +115,8 @@ struct StepLevelGuard {
 
 // Engine的抽象接口，不需要Engine的真实类型
 template <typename Context, size_t MaxDepth = 10, size_t MemorySize = 65536>
-class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
+class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context>,
+                    public TimeTracker {
    private:
     struct StateNode {
         IState<Context>* state = nullptr;
@@ -417,8 +418,13 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
         StateAction<Context> final_transition =
             StateAction<Context>::unhandled();
         {
-            // 【开启护盾】：防止在 on_tick 内部直接跳转导致栈崩溃
+            // 【开启护盾】：防止在 on_tick 内部直接跳转导致栈崰溃
             StepLevelGuard tick_guard(this->step_call_level_);
+
+            // 0. 先派发 Tick 到引擎自身
+            this->internal_tick(dt);
+            if (this->pending_transition_.has_value())
+                return;
 
             // 1. 优先派发 Tick 给全局无状态监听器
             for (auto& listener : this->listeners_) {
@@ -428,8 +434,8 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
             }
 
             // 2. HSM 冒泡：从最深层的状态向根状态派发 Tick
-            if (!this->pending_transition_.has_value()) {
-                for (int i = active_depth_ - 1; i >= 0; --i) {
+            if (!this->pending_transition_.has_value() && active_depth_ > 0) {
+                for (int i = static_cast<int>(active_depth_) - 1; i >= 0; --i) {
                     // 调用状态的 internal_tick
                     StateAction<Context> action =
                         active_path_[i].state->internal_tick(dt, ctx_);
@@ -464,6 +470,17 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
 
    public:
     ~IEngine() { stop(); };
+
+    // 启动前的回调
+    virtual void on_start(){};
+
+    // 启动后的周期回调
+    virtual void on_tick(double dt, Context& ctx) {}
+
+    void internal_tick(double dt) {
+        this->update_time(dt);
+        on_tick(dt, this->ctx_);
+    }
 
     Context& get_context() { return ctx_; }
 
@@ -972,33 +989,41 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
     }
 
     // ====== 引擎生命周期 ======
-    template <typename RootState, typename... Args>
+    template <typename RootState = void, typename... Args>
     void start(std::chrono::milliseconds tick_interval, Args&&... args) {
         bool expected = false;
         if (!running_.compare_exchange_strong(expected, true)) return;
         tick_interval_ = tick_interval;
 
-        // 不再起新线程，仅初始化数据和派发第一个事件
+        on_start();
+
+        // 初始化数据并开始 Tick
         work_guard_.emplace(boost::asio::make_work_guard(io_context_));
         workflow_pool_.emplace(std::make_unique<boost::asio::thread_pool>(4));
         schedule_next_tick();
 
-        // 派发初始状态跳转（放入 io_context 队列）
-        boost::asio::post(
-            io_context_, [this, args = std::make_tuple(
-                                    std::forward<Args>(args)...)]() mutable {
-                // 真正开始处理事件时，记录执行该任务的线程ID作为
-                // event_thread_id_
-                event_thread_id_ = std::this_thread::get_id();
-                std::apply(
-                    [this](auto&&... unpacked_args) {
-                        execute_transition(
-                            StateAction<Context>::template step<RootState>(
-                                std::forward<decltype(unpacked_args)>(
-                                    unpacked_args)...));
-                    },
-                    std::move(args));
-            });
+        if constexpr (std::is_same_v<RootState, void>) {
+            boost::asio::post(
+                io_context_, [this]() {
+                    event_thread_id_ = std::this_thread::get_id();
+                });
+        } else {
+            // 派发初始状态跳转（放入 io_context 队列）
+            boost::asio::post(
+                io_context_, [this, args = std::make_tuple(
+                                        std::forward<Args>(args)...)]() mutable {
+                    // 真正开始处理事件时，记录执行该任务的线程ID作为 event_thread_id_
+                    event_thread_id_ = std::this_thread::get_id();
+                    std::apply(
+                        [this](auto&&... unpacked_args) {
+                            execute_transition(
+                                StateAction<Context>::template step<RootState>(
+                                    std::forward<decltype(unpacked_args)>(
+                                        unpacked_args)...));
+                        },
+                        std::move(args));
+                });
+        }
     }
 
     void stop() {
@@ -1044,7 +1069,7 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context> {
 template <typename Context, typename DerivedEngine>
 class BaseEngine
     : public IEventHandler<IEngine<Context>, Context, void, DerivedEngine>,
-      public std::enable_shared_from_this<BaseEngine<Context, DerivedEngine>> {
+      public std::enable_shared_from_this<DerivedEngine> {
    private:
     // 使用子类类型作为模板参数，因为用到handle_event
     void process_internal(const EventBox& e) {
@@ -1113,8 +1138,9 @@ class BaseEngine
 
             // 4. HSM 事件冒泡核心
             if (!this->pending_transition_.has_value() &&
-                !final_transition.has_value()) {
-                for (int i = this->active_depth_ - 1; i >= 0; --i) {
+                !final_transition.has_value() && this->active_depth_ > 0) {
+                for (int i = static_cast<int>(this->active_depth_) - 1; i >= 0;
+                     --i) {
                     try {
                         StateAction<Context> action =
                             this->active_path_[i].state->handle_event(

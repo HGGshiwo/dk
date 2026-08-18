@@ -11,10 +11,8 @@ class BaseAdapter {
    protected:
     std::shared_ptr<BaseEngine<Context, DerivedEngine>> engine_;
 
-    /*
-        用boost::asio::post提交一个事件处理任务
-    */
-    void dispatch(std::any e) { engine_->dispatch(e); }
+    template <typename E>
+    void dispatch(E e) { engine_->dispatch(std::move(e)); }
 
    public:
     BaseAdapter(std::shared_ptr<DerivedEngine> engine) : engine_(engine) {}

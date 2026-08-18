@@ -5,18 +5,15 @@ project(dk)
 # 编译选项与 ASAN 配置
 # ==============================================================================
 add_library(asan_config INTERFACE)
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE "Debug")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -O0")
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(asan_config INTERFACE 
-            -fsanitize=address
-            -fno-omit-frame-pointer
-        )
-        target_link_options(asan_config INTERFACE 
-            -fsanitize=address
-        )
-    endif()
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -O0")
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(asan_config INTERFACE 
+        -fsanitize=address
+        -fno-omit-frame-pointer
+    )
+    target_link_options(asan_config INTERFACE 
+        -fsanitize=address
+    )
 endif()
 
 # ==============================================================================

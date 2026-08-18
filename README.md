@@ -138,3 +138,154 @@ void on_enter(Context& ctx) {
 
 
 这种极其紧凑的内存布局，使得状态数据完美契合 CPU Cache Line，极大提高了缓存命中率，让复杂状态树的切换开销保持在纳秒级别。
+
+---
+
+## 5. 最小使用示例 (Minimal Example)
+
+### 5.1 层次化状态机模式 (HSM Mode)
+
+下面是一个完整的、最小化的 C++ 示例，展示了如何定义 Context、事件、状态类，以及如何启动引擎和派发事件。
+
+```cpp
+#include <iostream>
+#include <boost/asio.hpp>
+#include <dk/engine.hpp>
+#include <dk/AsioTimeProvider.hpp>
+
+// 1. 定义上下文 (Context)，用于在状态机间共享数据
+struct AppContext {
+    int count = 0;
+};
+
+// 2. 定义两个测试事件
+struct TickEvent {};
+struct StartEvent {};
+
+// 3. 前置声明状态类
+class IdleState;
+class RunningState;
+
+// 4. 定义具体的状态类
+// IdleState 继承自 BaseState，第三个模板参数 void 表示它是一个顶层根状态
+class IdleState : public dk::BaseState<AppContext, IdleState, void> {
+public:
+    // 声明当前状态关心的事件列表
+    using AllowedEvents = std::tuple<TickEvent, StartEvent>;
+    using StateAction = dk::StateAction<AppContext>;
+
+    // 处理 TickEvent
+    StateAction on_event(const TickEvent& e, AppContext& ctx) {
+        std::cout << "[IdleState] Received TickEvent. Count: " << ctx.count << std::endl;
+        return StateAction::handled(); // 标记事件已处理，不发生状态跳转
+    }
+
+    // 处理 StartEvent
+    StateAction on_event(const StartEvent& e, AppContext& ctx) {
+        std::cout << "[IdleState] Received StartEvent. Transitioning to RunningState..." << std::endl;
+        return step<RunningState>(); // 跳转到 RunningState
+    }
+};
+
+// RunningState 同样是顶层状态
+class RunningState : public dk::BaseState<AppContext, RunningState, void> {
+public:
+    using AllowedEvents = std::tuple<TickEvent>;
+    using StateAction = dk::StateAction<AppContext>;
+
+    StateAction on_event(const TickEvent& e, AppContext& ctx) {
+        ctx.count++;
+        std::cout << "[RunningState] Received TickEvent. New Count: " << ctx.count << std::endl;
+        if (ctx.count >= 3) {
+            std::cout << "[RunningState] Reached target count. Transitioning back to IdleState..." << std::endl;
+            return step<IdleState>(); // 回退到 IdleState
+        }
+        return StateAction::handled();
+    }
+};
+
+// 5. 定义状态机引擎 (Engine)
+class MyEngine : public dk::BaseEngine<AppContext, MyEngine> {};
+
+int main() {
+    // 创建 Boost.Asio I/O 上下文
+    boost::asio::io_context ioc;
+
+    // 初始化时间提供器与引擎
+    auto time_provider = std::make_shared<dk::AsioTimeProvider>(ioc);
+    auto engine = std::make_shared<MyEngine>(ioc, time_provider);
+
+    // 启动引擎：设置初始状态为 IdleState，心跳周期为 100ms
+    engine->start<IdleState>(std::chrono::milliseconds(100));
+
+    // 派发测试事件，观察状态机的运转与切换
+    engine->dispatch(TickEvent{});   // 触发 IdleState 对 Tick 的处理
+    engine->dispatch(StartEvent{});  // 触发 IdleState 跳转到 RunningState
+    engine->dispatch(TickEvent{});   // 触发 RunningState 的计数自增
+    engine->dispatch(TickEvent{});   // 触发 RunningState 的计数自增
+    engine->dispatch(TickEvent{});   // 触发 RunningState 计数达到 3，跳转回 IdleState
+    engine->dispatch(TickEvent{});   // 再次触发 IdleState 的处理
+
+    // 启动 Boost.Asio 事件循环以执行上述事件
+    ioc.run();
+
+    return 0;
+}
+```
+
+### 5.2 无状态机反应器模式 (Pure Event Reactor Mode)
+
+如果你的业务场景非常简单，不需要维护复杂的状态流转（HSM），可以采用**纯事件反应器模式**。在此模式下，引擎无需绑定初始状态，你可以直接在引擎中接收并处理所有派发的事件。
+
+```cpp
+#include <iostream>
+#include <boost/asio.hpp>
+#include <dk/engine.hpp>
+#include <dk/AsioTimeProvider.hpp>
+
+// 1. 定义上下文 (Context)，用于在回调间共享数据
+struct AppContext {
+    int count = 0;
+};
+
+// 2. 定义测试事件
+struct TickEvent {};
+struct StartEvent {};
+
+// 3. 定义引擎，直接继承 BaseEngine 并重写事件处理函数 (on_event)
+class MyReactorEngine : public dk::BaseEngine<AppContext, MyReactorEngine> {
+public:
+    // 声明当前引擎关心的事件列表
+    using AllowedEvents = std::tuple<TickEvent, StartEvent>;
+
+    // 引擎层直接捕获并处理所有事件，无需经过任何状态机
+    void on_event(const TickEvent& e, AppContext& ctx) {
+        ctx.count++;
+        std::cout << "[Reactor] Received TickEvent. Current Count: " << ctx.count << std::endl;
+    }
+
+    void on_event(const StartEvent& e, AppContext& ctx) {
+        std::cout << "[Reactor] Received StartEvent. Doing some initialization..." << std::endl;
+    }
+};
+
+int main() {
+    boost::asio::io_context ioc;
+
+    auto time_provider = std::make_shared<dk::AsioTimeProvider>(ioc);
+    auto engine = std::make_shared<MyReactorEngine>(ioc, time_provider);
+
+    // 启动引擎：不需要传入任何 RootState，只设置心跳周期
+    engine->start(std::chrono::milliseconds(100));
+
+    // 派发测试事件，直接由引擎的 on_event 捕获处理
+    engine->dispatch(StartEvent{});
+    engine->dispatch(TickEvent{});
+    engine->dispatch(TickEvent{});
+
+    // 运行事件循环
+    ioc.run();
+
+    return 0;
+}
+```
