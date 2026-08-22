@@ -293,6 +293,31 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
         });
     }
 
+    void register_raw_handler(const std::string& topic,
+                              std::function<void(const MqttMessage&)> handler,
+                              uint8_t qos = 0) override {
+        class RawMqttHandler : public IMqttProtocolHandler {
+            std::function<void(const MqttMessage&)> handler_;
+
+           public:
+            RawMqttHandler(std::function<void(const MqttMessage&)> h, uint8_t q)
+                : handler_(std::move(h)) {
+                this->qos = q;
+            }
+
+            void handle(std::shared_ptr<IMqttSession>,
+                        const MqttMessage& msg) override {
+                if (handler_) {
+                    handler_(msg);
+                }
+            }
+        };
+
+        register_handler(topic, std::make_shared<RawMqttHandler>(
+                                    std::move(handler), qos));
+        spdlog::info("MqttAdapter register raw route: topic={}", topic);
+    }
+
     ~MqttClientAdapter() override {
         should_reconnect_ = false;
         boost::system::error_code ec;
