@@ -120,6 +120,7 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
             cause);
         is_connected_ = true;
         subscribe_to_routes();
+        this->dispatch(MqttConnectEvent{});
     }
 
     void on_connection_lost(const std::string& cause) {
