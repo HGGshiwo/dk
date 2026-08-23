@@ -36,6 +36,7 @@ inline boost::beast::string_view get_mime_type(boost::beast::string_view path) {
 
 struct WsOpenEvent {
     std::shared_ptr<WsConnection> conn;
+    std::string path;
 };
 
 inline const uint MAX_LOG_LENGTH = 500;  // 最多记录500个字符
@@ -66,6 +67,11 @@ class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
     std::string cors_origin_ = "*";
     std::string cors_methods_ = "GET, POST, PUT, DELETE, OPTIONS";
     std::string cors_headers_ = "Content-Type, Authorization";
+
+    // WebSocket 路径隔离与连接跟踪
+    std::map<std::string, std::set<std::shared_ptr<WsConnection>>>
+        path_connections_;
+    std::mutex path_connections_mutex_;
 
    public:
     WebAdapter(std::shared_ptr<DerivedEngine> engine, unsigned short port)
@@ -263,11 +269,21 @@ class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
             business_message_handler) {
         WsEndpoint managed_endpoint;
 
-        managed_endpoint.on_open = [this](std::shared_ptr<WsConnection> conn) {
-            this->engine_->dispatch(WsOpenEvent{conn});
+        managed_endpoint.on_open = [this,
+                                    path](std::shared_ptr<WsConnection> conn) {
+            {
+                std::lock_guard<std::mutex> lock(path_connections_mutex_);
+                path_connections_[path].insert(conn);
+            }
+            this->engine_->dispatch(WsOpenEvent{conn, path});
             conn_manager_->add(conn);
         };
-        managed_endpoint.on_close = [this](std::shared_ptr<WsConnection> conn) {
+        managed_endpoint.on_close = [this,
+                                     path](std::shared_ptr<WsConnection> conn) {
+            {
+                std::lock_guard<std::mutex> lock(path_connections_mutex_);
+                path_connections_[path].erase(conn);
+            }
             conn_manager_->remove(conn);
         };
         managed_endpoint.on_message = [this, business_message_handler](
@@ -293,6 +309,29 @@ class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
             }
         };
         register_ws_route(path, std::move(managed_endpoint));
+    }
+
+    void publish_to_path(const std::string& path,
+                         const nlohmann::json& payload) {
+        std::lock_guard<std::mutex> lock(path_connections_mutex_);
+        auto it = path_connections_.find(path);
+        if (it != path_connections_.end()) {
+            for (auto& conn : it->second) {
+                conn->send(payload);
+            }
+        }
+    }
+
+    void publish_state_to_path(const std::string& path,
+                               const std::string& state_key,
+                               const nlohmann::json& payload) {
+        std::lock_guard<std::mutex> lock(path_connections_mutex_);
+        auto it = path_connections_.find(path);
+        if (it != path_connections_.end()) {
+            for (auto& conn : it->second) {
+                conn->send_state(state_key, payload);
+            }
+        }
     }
 
     void register_static_dir(const std::string& url_prefix,
