@@ -123,6 +123,42 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
         this->dispatch(MqttConnectEvent{});
     }
 
+    class MqttConnectActionListener : public virtual mqtt::action_listener {
+        net::io_context& ioc_;
+        std::weak_ptr<MqttClientAdapter> adapter_weak_;
+
+       public:
+        MqttConnectActionListener(net::io_context& ioc,
+                                  std::shared_ptr<MqttClientAdapter> adapter)
+            : ioc_(ioc), adapter_weak_(adapter) {}
+
+        void on_failure(const mqtt::token& tok) override {
+            std::string err_msg = tok.get_reason_code_str();
+            if (err_msg.empty()) {
+                err_msg =
+                    "Reason code " + std::to_string(tok.get_reason_code());
+            }
+            net::post(ioc_, [weak = adapter_weak_, err_msg]() {
+                if (auto adapter = weak.lock()) {
+                    adapter->on_connect_failed(err_msg);
+                }
+            });
+        }
+
+        void on_success(const mqtt::token& tok) override {}
+    };
+
+    std::shared_ptr<MqttConnectActionListener> connect_listener_;
+
+    void on_connect_failed(const std::string& reason) {
+        spdlog::error(
+            "[MqttClientAdapter] MQTT connection failed: {}. Scheduling "
+            "reconnect...",
+            reason);
+        is_connected_ = false;
+        if (should_reconnect_) schedule_reconnect();
+    }
+
     void on_connection_lost(const std::string& cause) {
         spdlog::warn("[MqttClientAdapter] Connection lost: {}", cause);
         is_connected_ = false;
@@ -183,11 +219,14 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
             conn_opts.set_clean_start(true);
             conn_opts.set_automatic_reconnect(1, 10);  // <-- 底层自动断线重连！
 
+            connect_listener_ = std::make_shared<MqttConnectActionListener>(
+                ioc_, this->shared_from_this());
+
             spdlog::info(
                 "[MqttClientAdapter] Connecting to MQTT Broker at {} with "
                 "client_id: {}...",
                 server_address, client_id_);
-            client_->connect(conn_opts);
+            client_->connect(conn_opts, nullptr, *connect_listener_);
         } catch (const std::exception& ex) {
             spdlog::error("[MqttClientAdapter] Failed to start connection: {}",
                           ex.what());
@@ -313,8 +352,8 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
             }
         };
 
-        register_handler(topic, std::make_shared<RawMqttHandler>(
-                                    std::move(handler), qos));
+        register_handler(
+            topic, std::make_shared<RawMqttHandler>(std::move(handler), qos));
         spdlog::info("MqttAdapter register raw route: topic={}", topic);
     }
 
