@@ -134,7 +134,8 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
 
         void on_failure(const mqtt::token& tok) override {
             std::string err_msg =
-                "Reason code " + std::to_string(tok.get_reason_code());
+                "rc=" + std::to_string(tok.get_return_code()) +
+                " (reason=" + std::to_string(tok.get_reason_code()) + ")";
             net::post(ioc_, [weak = adapter_weak_, err_msg]() {
                 if (auto adapter = weak.lock()) {
                     adapter->on_connect_failed(err_msg);
