@@ -123,7 +123,7 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
         this->dispatch(MqttConnectEvent{});
     }
 
-    class MqttConnectActionListener : public virtual mqtt::action_listener {
+    class MqttConnectActionListener : public virtual mqtt::iaction_listener {
         net::io_context& ioc_;
         std::weak_ptr<MqttClientAdapter> adapter_weak_;
 
