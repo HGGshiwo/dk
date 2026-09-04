@@ -1,6 +1,7 @@
 #pragma once
 #include <mqtt/async_client.h>
 
+#include <algorithm>
 #include <atomic>
 #include <boost/asio.hpp>
 #include <chrono>
@@ -8,6 +9,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "../base.hpp"
 #include "./mqtt_rcp.hpp"
@@ -123,7 +125,9 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
         this->dispatch(MqttConnectEvent{});
     }
 
-    class MqttConnectActionListener : public virtual mqtt::iaction_listener {
+    class MqttConnectActionListener
+        : public virtual mqtt::iaction_listener,
+          public std::enable_shared_from_this<MqttConnectActionListener> {
         net::io_context& ioc_;
         std::weak_ptr<MqttClientAdapter> adapter_weak_;
 
@@ -136,17 +140,34 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
             std::string err_msg =
                 "rc=" + std::to_string(tok.get_return_code()) +
                 " (reason=" + std::to_string(tok.get_reason_code()) + ")";
-            net::post(ioc_, [weak = adapter_weak_, err_msg]() {
+            net::post(ioc_, [weak = adapter_weak_, err_msg,
+                             self = this->shared_from_this()]() {
                 if (auto adapter = weak.lock()) {
                     adapter->on_connect_failed(err_msg);
+                    adapter->remove_listener(self);
                 }
             });
         }
 
-        void on_success(const mqtt::token& tok) override {}
+        void on_success(const mqtt::token& tok) override {
+            net::post(ioc_, [weak = adapter_weak_,
+                             self = this->shared_from_this()]() {
+                if (auto adapter = weak.lock()) {
+                    adapter->remove_listener(self);
+                }
+            });
+        }
     };
 
-    std::shared_ptr<MqttConnectActionListener> connect_listener_;
+    std::vector<std::shared_ptr<MqttConnectActionListener>> pending_listeners_;
+
+    void remove_listener(std::shared_ptr<MqttConnectActionListener> l) {
+        auto it =
+            std::find(pending_listeners_.begin(), pending_listeners_.end(), l);
+        if (it != pending_listeners_.end()) {
+            pending_listeners_.erase(it);
+        }
+    }
 
     void on_connect_failed(const std::string& reason) {
         spdlog::error(
@@ -217,14 +238,15 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
             conn_opts.set_clean_start(true);
             conn_opts.set_automatic_reconnect(1, 10);  // <-- 底层自动断线重连！
 
-            connect_listener_ = std::make_shared<MqttConnectActionListener>(
+            auto listener = std::make_shared<MqttConnectActionListener>(
                 ioc_, this->shared_from_this());
+            pending_listeners_.push_back(listener);
 
             spdlog::info(
                 "[MqttClientAdapter] Connecting to MQTT Broker at {} with "
                 "client_id: {}...",
                 server_address, client_id_);
-            client_->connect(conn_opts, nullptr, *connect_listener_);
+            client_->connect(conn_opts, nullptr, *listener);
         } catch (const std::exception& ex) {
             spdlog::error("[MqttClientAdapter] Failed to start connection: {}",
                           ex.what());
