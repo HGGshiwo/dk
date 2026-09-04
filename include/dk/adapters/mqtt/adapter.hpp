@@ -6,6 +6,8 @@
 #include <boost/asio.hpp>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <string>
@@ -195,46 +197,56 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
     }
 
     void do_connect() {
-        if (client_) {
-            try {
-                if (client_->is_connected()) {
-                    client_->disconnect()->wait();
-                }
-            } catch (...) {
+        const char* proxy_envs[] = {"http_proxy",  "HTTP_PROXY", "https_proxy",
+                                    "HTTPS_PROXY", "all_proxy",  "ALL_PROXY"};
+        for (const char* env_name : proxy_envs) {
+            const char* val = ::getenv(env_name);
+            if (val && std::strlen(val) == 0) {
+                ::unsetenv(env_name);
             }
-            client_.reset();
         }
 
-        std::string server_address =
-            "tcp://" + host_ + ":" + std::to_string(port_);
+        if (!client_) {
+            std::string server_address =
+                "tcp://" + host_ + ":" + std::to_string(port_);
 
-        if (client_id_.empty()) {
-            client_id_ =
-                "dk_client_" + std::to_string(std::chrono::steady_clock::now()
-                                                  .time_since_epoch()
-                                                  .count());
+            if (client_id_.empty()) {
+                client_id_ = "dk_client_" +
+                             std::to_string(std::chrono::steady_clock::now()
+                                                .time_since_epoch()
+                                                .count());
+            }
+
+            try {
+                // 1. 设置创建选项：允许在未连接/断连期间发送消息（Offline
+                // Buffering）
+                auto create_opts =
+                    mqtt::create_options_builder()
+                        .send_while_disconnected(
+                            true, true)  // 缓存开启，持久化=true，最多存1000条
+                        .finalize();
+
+                client_ = std::make_unique<mqtt::async_client>(
+                    server_address, client_id_, create_opts);
+                cb_ = std::make_shared<MqttPahoCallback>(
+                    ioc_, this->shared_from_this());
+                client_->set_callback(*cb_);
+            } catch (const std::exception& ex) {
+                spdlog::error(
+                    "[MqttClientAdapter] Failed to create async client: {}",
+                    ex.what());
+                if (should_reconnect_) schedule_reconnect();
+                return;
+            }
         }
 
         try {
-            // 1. 设置创建选项：允许在未连接/断连期间发送消息（Offline
-            // Buffering）
-            auto create_opts =
-                mqtt::create_options_builder()
-                    .send_while_disconnected(
-                        true, true)  // 缓存开启，持久化=true，最多存1000条
-                    .finalize();
-
-            client_ = std::make_unique<mqtt::async_client>(
-                server_address, client_id_, create_opts);
-            cb_ = std::make_shared<MqttPahoCallback>(ioc_,
-                                                     this->shared_from_this());
-            client_->set_callback(*cb_);
-
             // 2. 设置连接选项：开启自动重连 (min 1s, max 10s Exponential
             // Backoff)
             mqtt::connect_options conn_opts;
             conn_opts.set_mqtt_version(MQTTVERSION_5);
             conn_opts.set_keep_alive_interval(20);
+            conn_opts.set_connect_timeout(30);
             conn_opts.set_clean_start(true);
             conn_opts.set_automatic_reconnect(1, 10);  // <-- 底层自动断线重连！
 
@@ -243,9 +255,10 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
             pending_listeners_.push_back(listener);
 
             spdlog::info(
-                "[MqttClientAdapter] Connecting to MQTT Broker at {} with "
+                "[MqttClientAdapter] Connecting to MQTT Broker at tcp://{}:{} "
+                "with "
                 "client_id: {}...",
-                server_address, client_id_);
+                host_, port_, client_id_);
             client_->connect(conn_opts, nullptr, *listener);
         } catch (const std::exception& ex) {
             spdlog::error("[MqttClientAdapter] Failed to start connection: {}",
