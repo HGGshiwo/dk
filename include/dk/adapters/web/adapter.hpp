@@ -473,48 +473,83 @@ class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
         }
     }
 
-    // --- 1.4 注册成员函数 HTTP 处理器 (显式指定 EventType 和 RetType) ---
-    // 用法: web_adapter_->register_handler<EventType, RetType>(verb, url,
-    // &MyClass::method, this);
-    template <typename EventType, typename RetType, typename MemFn,
-              typename ClassPtr, typename DecayedFn = std::decay_t<MemFn>,
-              typename = std::enable_if_t<
-                  std::is_member_function_pointer_v<DecayedFn>>>
+    // --- 1.4 注册成员函数 HTTP 处理器 (显式指定 EventType 和
+    // RetType，支持绑定额外参数) --- 用法:
+    // web_adapter_->register_handler<EventType, RetType>(verb, url,
+    // &MyClass::method, this, extra1, extra2...);
+    template <
+        typename EventType, typename RetType, typename MemFn, typename ClassPtr,
+        typename... BoundArgs, typename DecayedFn = std::decay_t<MemFn>,
+        typename =
+            std::enable_if_t<std::is_member_function_pointer_v<DecayedFn>>>
     void register_handler(boost::beast::http::verb method,
                           const std::string& path, MemFn mem_fn,
-                          ClassPtr&& instance) {
-        register_handler<EventType, RetType>(
-            method, path,
-            [mem_fn, inst = std::forward<ClassPtr>(instance)](
-                auto&&... args) -> decltype(auto) {
-                return std::invoke(mem_fn, inst,
-                                   std::forward<decltype(args)>(args)...);
-            });
+                          ClassPtr&& instance, BoundArgs&&... bound_args) {
+        if constexpr (sizeof...(BoundArgs) == 0) {
+            register_handler<EventType, RetType>(
+                method, path,
+                [mem_fn, inst = std::forward<ClassPtr>(instance)](
+                    auto&&... args) -> decltype(auto) {
+                    return std::invoke(mem_fn, inst,
+                                       std::forward<decltype(args)>(args)...);
+                });
+        } else {
+            auto bound_tuple =
+                std::make_tuple(std::forward<BoundArgs>(bound_args)...);
+            register_handler<EventType, RetType>(
+                method, path,
+                [mem_fn, inst = std::forward<ClassPtr>(instance),
+                 bound_tuple =
+                     std::move(bound_tuple)](auto&&... args) -> decltype(auto) {
+                    return std::apply(
+                        [&](auto&&... b_args) -> decltype(auto) {
+                            if constexpr (std::is_void_v<EventType>) {
+                                return std::invoke(
+                                    mem_fn, inst,
+                                    std::forward<decltype(b_args)>(b_args)...);
+                            } else {
+                                return std::invoke(
+                                    mem_fn, inst,
+                                    std::forward<decltype(args)>(args)...,
+                                    std::forward<decltype(b_args)>(b_args)...);
+                            }
+                        },
+                        bound_tuple);
+                });
+        }
     }
 
-    // --- 1.5 注册成员函数 HTTP 处理器 (完全自动推导 EventType 和 RetType) ---
-    // 用法: web_adapter_->register_handler(verb, url, &MyClass::method, this);
-    template <typename MemFn, typename ClassPtr,
+    // --- 1.5 注册成员函数 HTTP 处理器 (完全自动推导 EventType 和
+    // RetType，支持绑定额外参数) --- 用法: web_adapter_->register_handler(verb,
+    // url, &MyClass::method, this, extra1, extra2...);
+    template <typename MemFn, typename ClassPtr, typename... BoundArgs,
               typename DecayedFn = std::decay_t<MemFn>,
               typename Traits = callable_traits<DecayedFn>,
               typename = std::enable_if_t<
                   std::is_member_function_pointer_v<DecayedFn>>>
     void register_handler(boost::beast::http::verb method,
                           const std::string& path, MemFn mem_fn,
-                          ClassPtr&& instance) {
-        if constexpr (Traits::arity == 0) {
+                          ClassPtr&& instance, BoundArgs&&... bound_args) {
+        constexpr size_t total_args = Traits::arity;
+        constexpr size_t bound_count = sizeof...(BoundArgs);
+        static_assert(total_args >= bound_count,
+                      "Too many bound arguments passed to register_handler!");
+        static_assert(
+            total_args - bound_count <= 1,
+            "Member function has unbound arguments that are not EventType!");
+
+        if constexpr (total_args == bound_count) {
             using InferredRetType = typename Traits::return_type;
             register_handler<void, InferredRetType>(
-                method, path, mem_fn, std::forward<ClassPtr>(instance));
-        } else if constexpr (Traits::arity == 1) {
+                method, path, mem_fn, std::forward<ClassPtr>(instance),
+                std::forward<BoundArgs>(bound_args)...);
+        } else {
             using InferredEventType = std::decay_t<
                 std::tuple_element_t<0, typename Traits::args_tuple>>;
             using InferredRetType = typename Traits::return_type;
             register_handler<InferredEventType, InferredRetType>(
-                method, path, mem_fn, std::forward<ClassPtr>(instance));
-        } else {
-            static_assert(Traits::arity <= 1,
-                          "Member function handler must take 0 or 1 argument!");
+                method, path, mem_fn, std::forward<ClassPtr>(instance),
+                std::forward<BoundArgs>(bound_args)...);
         }
     }
 
