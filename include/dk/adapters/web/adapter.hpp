@@ -2,8 +2,11 @@
 #include <boost/beast/http/file_body.hpp>
 #include <boost/filesystem.hpp>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <set>
+#include <tuple>
+#include <type_traits>
 
 #include "./protocal.hpp"
 #include "./websocket.hpp"
@@ -40,6 +43,122 @@ struct WsOpenEvent {
 };
 
 inline const uint MAX_LOG_LENGTH = 500;  // 最多记录500个字符
+
+inline int hex_to_int(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+inline std::string url_decode(boost::beast::string_view str) {
+    std::string ret;
+    ret.reserve(str.size());
+    for (size_t i = 0; i < str.size(); ++i) {
+        if (str[i] == '%' && i + 2 < str.size()) {
+            int h1 = hex_to_int(str[i + 1]);
+            int h2 = hex_to_int(str[i + 2]);
+            if (h1 >= 0 && h2 >= 0) {
+                ret += static_cast<char>((h1 << 4) | h2);
+                i += 2;
+                continue;
+            }
+        }
+        if (str[i] == '+') {
+            ret += ' ';
+        } else {
+            ret += str[i];
+        }
+    }
+    return ret;
+}
+
+inline nlohmann::json parse_query_to_json(boost::beast::string_view target) {
+    nlohmann::json j = nlohmann::json::object();
+    auto pos = target.find('?');
+    if (pos == boost::beast::string_view::npos) return j;
+    auto query = target.substr(pos + 1);
+
+    size_t start = 0;
+    while (start < query.size()) {
+        auto ampersand = query.find('&', start);
+        auto pair = (ampersand == boost::beast::string_view::npos)
+                        ? query.substr(start)
+                        : query.substr(start, ampersand - start);
+        if (!pair.empty()) {
+            auto eq = pair.find('=');
+            if (eq != boost::beast::string_view::npos) {
+                std::string key = url_decode(pair.substr(0, eq));
+                std::string val = url_decode(pair.substr(eq + 1));
+                if (val == "true") {
+                    j[key] = true;
+                } else if (val == "false") {
+                    j[key] = false;
+                } else {
+                    char* end = nullptr;
+                    long long int_val = std::strtoll(val.c_str(), &end, 10);
+                    if (end && *end == '\0') {
+                        j[key] = int_val;
+                    } else {
+                        double dbl_val = std::strtod(val.c_str(), &end);
+                        if (end && *end == '\0') {
+                            j[key] = dbl_val;
+                        } else {
+                            j[key] = val;
+                        }
+                    }
+                }
+            } else {
+                std::string key = url_decode(pair);
+                j[key] = true;
+            }
+        }
+        if (ampersand == boost::beast::string_view::npos) break;
+        start = ampersand + 1;
+    }
+    return j;
+}
+
+template <typename T, typename = void>
+struct callable_traits {
+    static constexpr bool is_callable = false;
+};
+
+template <typename T>
+struct callable_traits<T, std::void_t<decltype(&T::operator())>>
+    : callable_traits<decltype(&T::operator())> {};
+
+template <typename ClassType, typename ReturnType, typename... Args>
+struct callable_traits<ReturnType (ClassType::*)(Args...) const> {
+    static constexpr bool is_callable = true;
+    using return_type = ReturnType;
+    using args_tuple = std::tuple<Args...>;
+    static constexpr size_t arity = sizeof...(Args);
+};
+
+template <typename ClassType, typename ReturnType, typename... Args>
+struct callable_traits<ReturnType (ClassType::*)(Args...)> {
+    static constexpr bool is_callable = true;
+    using return_type = ReturnType;
+    using args_tuple = std::tuple<Args...>;
+    static constexpr size_t arity = sizeof...(Args);
+};
+
+template <typename ReturnType, typename... Args>
+struct callable_traits<ReturnType (*)(Args...)> {
+    static constexpr bool is_callable = true;
+    using return_type = ReturnType;
+    using args_tuple = std::tuple<Args...>;
+    static constexpr size_t arity = sizeof...(Args);
+};
+
+template <typename ReturnType, typename... Args>
+struct callable_traits<ReturnType (&)(Args...)> {
+    static constexpr bool is_callable = true;
+    using return_type = ReturnType;
+    using args_tuple = std::tuple<Args...>;
+    static constexpr size_t arity = sizeof...(Args);
+};
 
 template <typename Context, typename DerivedEngine>
 class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
@@ -124,6 +243,279 @@ class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
         boost::beast::http::verb method, const std::string& path,
         std::shared_ptr<IProtocolHandler<WebAdapter>> handler) {
         routes_[{method, path}] = std::move(handler);
+    }
+
+    // Lambda HTTP Handler 实现
+    template <typename EventType, typename RetType, typename Callback>
+    class LambdaHttpHandler
+        : public IProtocolHandler<WebAdapter>,
+          public std::enable_shared_from_this<
+              LambdaHttpHandler<EventType, RetType, Callback>> {
+        Callback callback_;
+        std::string method_;
+        std::string path_;
+
+        void log_request(const std::string& data) {
+            spdlog::info(
+                "[WebAdapter] receive request: method={} path={} body={}",
+                method_, path_, data.substr(0, MAX_LOG_LENGTH));
+        }
+        void log_result(const std::string& data) {
+            spdlog::info(
+                "[WebAdapter] send response: method={} path={} body={}",
+                method_, path_, data.substr(0, MAX_LOG_LENGTH));
+        }
+
+       public:
+        LambdaHttpHandler(Callback cb, std::string method, std::string path)
+            : callback_(std::move(cb)),
+              method_(std::move(method)),
+              path_(std::move(path)) {}
+
+        void handle(std::shared_ptr<HttpSession<WebAdapter>> session,
+                    http::request<http::string_body> req) override {
+            try {
+                log_request(req.body());
+
+                if constexpr (std::is_void_v<EventType>) {
+                    invoke_and_respond(session);
+                } else {
+                    EventType event = parse_event(req);
+                    invoke_and_respond(session, std::move(event));
+                }
+            } catch (const json::exception& ex) {
+                json j_err;
+                j_err["error"] = "Invalid JSON payload";
+                j_err["detail"] = ex.what();
+                send_response(session, http::status::bad_request, j_err.dump());
+            } catch (const std::exception& ex) {
+                json j_err;
+                j_err["error"] = "Internal server error";
+                j_err["detail"] = ex.what();
+                send_response(session, http::status::internal_server_error,
+                              j_err.dump());
+            } catch (...) {
+                send_response(session, http::status::internal_server_error,
+                              "{\"error\":\"Unknown internal error\"}");
+            }
+        }
+
+       private:
+        template <typename E = EventType>
+        E parse_event(const http::request<http::string_body>& req) {
+            static_assert(!std::is_void_v<E>,
+                          "parse_event cannot be called for void EventType");
+            if (!req.body().empty()) {
+                json j = json::parse(req.body());
+                return j.template get<E>();
+            }
+            json q = parse_query_to_json(req.target());
+            if (!q.empty()) {
+                return q.template get<E>();
+            }
+            return E{};
+        }
+
+        template <typename E>
+        void invoke_and_respond(
+            std::shared_ptr<HttpSession<WebAdapter>> session, E&& event) {
+            if constexpr (std::is_void_v<RetType>) {
+                callback_(std::forward<E>(event));
+                send_response(session, http::status::ok, "{\"status\":\"ok\"}");
+            } else if constexpr (dk::is_future<RetType>::value) {
+                auto fut = callback_(std::forward<E>(event));
+                handle_future(session, std::move(fut));
+            } else {
+                RetType result = callback_(std::forward<E>(event));
+                send_data_response(session, result);
+            }
+        }
+
+        void invoke_and_respond(
+            std::shared_ptr<HttpSession<WebAdapter>> session) {
+            if constexpr (std::is_void_v<RetType>) {
+                callback_();
+                send_response(session, http::status::ok, "{\"status\":\"ok\"}");
+            } else if constexpr (dk::is_future<RetType>::value) {
+                auto fut = callback_();
+                handle_future(session, std::move(fut));
+            } else {
+                RetType result = callback_();
+                send_data_response(session, result);
+            }
+        }
+
+        template <typename Fut>
+        void handle_future(std::shared_ptr<HttpSession<WebAdapter>> session,
+                           Fut&& fut) {
+            using ValueType = typename std::decay_t<Fut>::value_type;
+            auto self = this->shared_from_this();
+            if constexpr (std::is_void_v<ValueType>) {
+                std::move(fut)
+                    .then([session, self]() {
+                        self->send_response(session, http::status::ok,
+                                            "{\"status\":\"ok\"}");
+                    })
+                    .catch_error([session, self](std::exception_ptr e) {
+                        std::string err_msg = "Unknown internal error";
+                        try {
+                            if (e) std::rethrow_exception(e);
+                        } catch (const std::exception& ex) {
+                            err_msg = ex.what();
+                        } catch (...) {
+                        }
+                        json j_err;
+                        j_err["error"] = err_msg;
+                        self->send_response(session,
+                                            http::status::internal_server_error,
+                                            j_err.dump());
+                    });
+            } else {
+                std::move(fut)
+                    .then([session, self](ValueType result) {
+                        self->send_data_response(session, result);
+                    })
+                    .catch_error([session, self](std::exception_ptr e) {
+                        std::string err_msg = "Unknown internal error";
+                        try {
+                            if (e) std::rethrow_exception(e);
+                        } catch (const std::exception& ex) {
+                            err_msg = ex.what();
+                        } catch (...) {
+                        }
+                        json j_err;
+                        j_err["error"] = err_msg;
+                        self->send_response(session,
+                                            http::status::internal_server_error,
+                                            j_err.dump());
+                    });
+            }
+        }
+
+        template <typename T>
+        void send_data_response(
+            std::shared_ptr<HttpSession<WebAdapter>> session, const T& result) {
+            if constexpr (std::is_same_v<std::decay_t<T>, nlohmann::json>) {
+                send_response(session, http::status::ok, result.dump());
+            } else if constexpr (std::is_same_v<std::decay_t<T>, std::string>) {
+                send_response(session, http::status::ok, result);
+            } else {
+                json j_res = result;
+                send_response(session, http::status::ok, j_res.dump());
+            }
+        }
+
+        void send_response(std::shared_ptr<HttpSession<WebAdapter>> session,
+                           http::status status, const std::string& data) {
+            session->send_http_response(status, data, "application/json");
+            log_result(data);
+        }
+    };
+
+    // --- 1.1 注册模板化 Lambda HTTP 处理器 (显式指定 EventType 和 RetType) ---
+    template <typename EventType, typename RetType, typename Callback>
+    void register_handler(boost::beast::http::verb method,
+                          const std::string& path, Callback&& callback) {
+        using HandlerType =
+            LambdaHttpHandler<EventType, RetType, std::decay_t<Callback>>;
+        auto handler = std::make_shared<HandlerType>(
+            std::forward<Callback>(callback),
+            std::string(boost::beast::http::to_string(method)), path);
+        register_handler(method, path, std::move(handler));
+        spdlog::info("[WebAdapter] register lambda handler: method={} path={}",
+                     std::string(boost::beast::http::to_string(method)), path);
+    }
+
+    // --- 1.2 注册模板化 Lambda HTTP 处理器 (指定 EventType，自动推导 RetType)
+    // ---
+    template <typename EventType, typename Callback,
+              typename DecayedCb = std::decay_t<Callback>,
+              typename = std::enable_if_t<!std::is_convertible_v<
+                  DecayedCb, std::shared_ptr<IProtocolHandler<WebAdapter>>>>>
+    void register_handler(boost::beast::http::verb method,
+                          const std::string& path, Callback&& callback) {
+        using InferredRetType = std::conditional_t<
+            std::is_void_v<EventType>, std::invoke_result_t<DecayedCb>,
+            std::conditional_t<
+                std::is_invocable_v<DecayedCb, const EventType&>,
+                std::invoke_result_t<DecayedCb, const EventType&>,
+                std::invoke_result_t<DecayedCb, EventType>>>;
+
+        register_handler<EventType, InferredRetType>(
+            method, path, std::forward<Callback>(callback));
+    }
+
+    // --- 1.3 注册模板化 Lambda HTTP 处理器 (完全自动推导 EventType 和 RetType)
+    // ---
+    template <typename Callback,
+              typename Traits = callable_traits<std::decay_t<Callback>>,
+              typename = std::enable_if_t<
+                  !std::is_convertible_v<
+                      std::decay_t<Callback>,
+                      std::shared_ptr<IProtocolHandler<WebAdapter>>> &&
+                  Traits::is_callable>>
+    void register_handler(boost::beast::http::verb method,
+                          const std::string& path, Callback&& callback) {
+        if constexpr (Traits::arity == 0) {
+            using InferredRetType = typename Traits::return_type;
+            register_handler<void, InferredRetType>(
+                method, path, std::forward<Callback>(callback));
+        } else if constexpr (Traits::arity == 1) {
+            using InferredEventType = std::decay_t<
+                std::tuple_element_t<0, typename Traits::args_tuple>>;
+            using InferredRetType = typename Traits::return_type;
+            register_handler<InferredEventType, InferredRetType>(
+                method, path, std::forward<Callback>(callback));
+        } else {
+            static_assert(
+                Traits::arity <= 1,
+                "register_handler callback must take 0 or 1 argument!");
+        }
+    }
+
+    // --- 1.4 注册成员函数 HTTP 处理器 (显式指定 EventType 和 RetType) ---
+    // 用法: web_adapter_->register_handler<EventType, RetType>(verb, url,
+    // &MyClass::method, this);
+    template <typename EventType, typename RetType, typename MemFn,
+              typename ClassPtr, typename DecayedFn = std::decay_t<MemFn>,
+              typename = std::enable_if_t<
+                  std::is_member_function_pointer_v<DecayedFn>>>
+    void register_handler(boost::beast::http::verb method,
+                          const std::string& path, MemFn mem_fn,
+                          ClassPtr&& instance) {
+        register_handler<EventType, RetType>(
+            method, path,
+            [mem_fn, inst = std::forward<ClassPtr>(instance)](
+                auto&&... args) -> decltype(auto) {
+                return std::invoke(mem_fn, inst,
+                                   std::forward<decltype(args)>(args)...);
+            });
+    }
+
+    // --- 1.5 注册成员函数 HTTP 处理器 (完全自动推导 EventType 和 RetType) ---
+    // 用法: web_adapter_->register_handler(verb, url, &MyClass::method, this);
+    template <typename MemFn, typename ClassPtr,
+              typename DecayedFn = std::decay_t<MemFn>,
+              typename Traits = callable_traits<DecayedFn>,
+              typename = std::enable_if_t<
+                  std::is_member_function_pointer_v<DecayedFn>>>
+    void register_handler(boost::beast::http::verb method,
+                          const std::string& path, MemFn mem_fn,
+                          ClassPtr&& instance) {
+        if constexpr (Traits::arity == 0) {
+            using InferredRetType = typename Traits::return_type;
+            register_handler<void, InferredRetType>(
+                method, path, mem_fn, std::forward<ClassPtr>(instance));
+        } else if constexpr (Traits::arity == 1) {
+            using InferredEventType = std::decay_t<
+                std::tuple_element_t<0, typename Traits::args_tuple>>;
+            using InferredRetType = typename Traits::return_type;
+            register_handler<InferredEventType, InferredRetType>(
+                method, path, mem_fn, std::forward<ClassPtr>(instance));
+        } else {
+            static_assert(Traits::arity <= 1,
+                          "Member function handler must take 0 or 1 argument!");
+        }
     }
 
     // --- 2. 现有的 HTTP JSON 路由 (API 保持不变) ---
