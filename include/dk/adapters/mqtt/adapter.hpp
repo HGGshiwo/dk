@@ -177,12 +177,14 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
             "reconnect...",
             reason);
         is_connected_ = false;
+        this->dispatch(MqttDisconnectEvent{reason});
         if (should_reconnect_) schedule_reconnect();
     }
 
     void on_connection_lost(const std::string& cause) {
         spdlog::warn("[MqttClientAdapter] Connection lost: {}", cause);
         is_connected_ = false;
+        this->dispatch(MqttDisconnectEvent{cause});
         // 依赖 paho 底层自动重连，此处不需要主动调用 schedule_reconnect()
     }
 

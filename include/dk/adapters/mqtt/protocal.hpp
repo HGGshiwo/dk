@@ -12,6 +12,9 @@
 namespace dk {
 
 struct MqttConnectEvent {};
+struct MqttDisconnectEvent {
+    std::string cause;
+};
 
 struct MqttMessage {
     std::string topic;
@@ -73,8 +76,7 @@ class IMqttClient : public IMqttSession {
     // 注册原始 MQTT 消息接收回调
     virtual void register_raw_handler(
         const std::string& topic,
-        std::function<void(const MqttMessage&)> handler,
-        uint8_t qos = 0) = 0;
+        std::function<void(const MqttMessage&)> handler, uint8_t qos = 0) = 0;
 
     // --- Category 2: Request (请求-响应模型 RPC) ---
     virtual dk::Future<nlohmann::json> request(
