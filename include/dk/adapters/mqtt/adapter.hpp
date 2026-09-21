@@ -142,34 +142,19 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
             std::string err_msg =
                 "rc=" + std::to_string(tok.get_return_code()) +
                 " (reason=" + std::to_string(tok.get_reason_code()) + ")";
-            net::post(ioc_, [weak = adapter_weak_, err_msg,
-                             self = this->shared_from_this()]() {
+            net::post(ioc_, [weak = adapter_weak_, err_msg]() {
                 if (auto adapter = weak.lock()) {
                     adapter->on_connect_failed(err_msg);
-                    adapter->remove_listener(self);
                 }
             });
         }
 
         void on_success(const mqtt::token& tok) override {
-            net::post(ioc_, [weak = adapter_weak_,
-                             self = this->shared_from_this()]() {
-                if (auto adapter = weak.lock()) {
-                    adapter->remove_listener(self);
-                }
-            });
+            // Keep listener alive across automatic reconnects
         }
     };
 
-    std::vector<std::shared_ptr<MqttConnectActionListener>> pending_listeners_;
-
-    void remove_listener(std::shared_ptr<MqttConnectActionListener> l) {
-        auto it =
-            std::find(pending_listeners_.begin(), pending_listeners_.end(), l);
-        if (it != pending_listeners_.end()) {
-            pending_listeners_.erase(it);
-        }
-    }
+    std::shared_ptr<MqttConnectActionListener> connect_listener_;
 
     void on_connect_failed(const std::string& reason) {
         spdlog::error(
@@ -252,16 +237,21 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
             conn_opts.set_clean_start(true);
             conn_opts.set_automatic_reconnect(1, 10);  // <-- 底层自动断线重连！
 
-            auto listener = std::make_shared<MqttConnectActionListener>(
-                ioc_, this->shared_from_this());
-            pending_listeners_.push_back(listener);
+            if (is_connected_ && client_ && client_->is_connected()) {
+                return;
+            }
+
+            if (!connect_listener_) {
+                connect_listener_ = std::make_shared<MqttConnectActionListener>(
+                    ioc_, this->shared_from_this());
+            }
 
             spdlog::info(
                 "[MqttClientAdapter] Connecting to MQTT Broker at tcp://{}:{} "
                 "with "
                 "client_id: {}...",
                 host_, port_, client_id_);
-            client_->connect(conn_opts, nullptr, *listener);
+            client_->connect(conn_opts, nullptr, *connect_listener_);
         } catch (const std::exception& ex) {
             spdlog::error("[MqttClientAdapter] Failed to start connection: {}",
                           ex.what());
@@ -307,6 +297,27 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
         return topic;  // 没有特殊前缀，原样返回
     }
 
+    static bool mqtt_topic_matches_wildcard(const std::string& pattern,
+                                            const std::string& topic) {
+        size_t p_len = pattern.length(), t_len = topic.length();
+        size_t p = 0, t = 0;
+        while (p < p_len && t < t_len) {
+            if (pattern[p] == '#') {
+                return (p == 0 || pattern[p - 1] == '/');
+            }
+            if (pattern[p] == '+') {
+                while (t < t_len && topic[t] != '/') ++t;
+                ++p;
+                continue;
+            }
+            if (pattern[p] != topic[t]) return false;
+            ++p;
+            ++t;
+        }
+        if (p < p_len && pattern[p] == '#') return true;
+        return p == p_len && t == t_len;
+    }
+
     void on_message(const std::string& topic, const std::string& payload,
                     int qos, const std::string& response_topic,
                     const std::string& correlation_data) {
@@ -323,7 +334,20 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
         auto it = routes_.find(topic);
         if (it != routes_.end()) {
             it->second->handle(this->shared_from_this(), msg);
-        } else {
+            return;
+        }
+
+        bool matched_wildcard = false;
+        for (const auto& [pattern, handler] : routes_) {
+            if ((pattern.find('+') != std::string::npos ||
+                 pattern.find('#') != std::string::npos) &&
+                mqtt_topic_matches_wildcard(pattern, topic)) {
+                handler->handle(this->shared_from_this(), msg);
+                matched_wildcard = true;
+            }
+        }
+
+        if (!matched_wildcard) {
             spdlog::warn("[MqttClientAdapter] No route registered for: {}",
                          topic);
         }
