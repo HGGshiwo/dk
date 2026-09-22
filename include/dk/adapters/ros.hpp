@@ -47,9 +47,13 @@ class RosAdapter : public dk::BaseAdapter<Context, EngineType> {
 #ifdef USE_ROS1
     RosAdapter(std::shared_ptr<EngineType> engine, ros::NodeHandle nh)
         : dk::BaseAdapter<Context, EngineType>(engine), nh_(nh) {}
+
+    auto get_engine() const { return this->engine_; }
 #elif defined(USE_ROS2)
     RosAdapter(std::shared_ptr<EngineType> engine, rclcpp::Node::SharedPtr node)
         : dk::BaseAdapter<Context, EngineType>(engine), node_(node) {}
+
+    auto get_engine() const { return this->engine_; }
 #endif
 
     /*

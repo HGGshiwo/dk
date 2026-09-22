@@ -263,6 +263,9 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
         if (routes_.empty() || !client_) return;
         try {
             for (const auto& [topic, handler] : routes_) {
+                // 已被通配路由覆盖的主题不再向 broker 订阅，
+                // 消息经通配订阅送达后由本地分发到所有匹配路由
+                if (is_covered_by_wildcard(topic)) continue;
                 client_->subscribe(topic, handler->qos);
             }
         } catch (const std::exception& ex) {
@@ -318,6 +321,22 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
         return p == p_len && t == t_len;
     }
 
+    static bool has_wildcard(const std::string& topic) {
+        return topic.find('+') != std::string::npos ||
+               topic.find('#') != std::string::npos;
+    }
+
+    // 是否存在能覆盖 topic 的其他通配路由（精确匹配与通配匹配互不短路，
+    // 但被通配覆盖的主题无需在 broker 端重复订阅，避免重叠订阅导致重复投递）
+    bool is_covered_by_wildcard(const std::string& topic) const {
+        for (const auto& [pattern, handler] : routes_) {
+            if (pattern == topic) continue;
+            if (!has_wildcard(pattern)) continue;
+            if (mqtt_topic_matches_wildcard(pattern, topic)) return true;
+        }
+        return false;
+    }
+
     void on_message(const std::string& topic, const std::string& payload,
                     int qos, const std::string& response_topic,
                     const std::string& correlation_data) {
@@ -331,23 +350,24 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
 
         if (rpc_invoker_.try_intercept_rpc_response(msg)) return;
 
+        // 精确匹配不再短路：一条消息分发给所有匹配的路由（精确 + 通配符），
+        // 与 broker 对重叠订阅的投递语义保持一致
+        bool handled = false;
         auto it = routes_.find(topic);
         if (it != routes_.end()) {
             it->second->handle(this->shared_from_this(), msg);
-            return;
+            handled = true;
         }
 
-        bool matched_wildcard = false;
         for (const auto& [pattern, handler] : routes_) {
-            if ((pattern.find('+') != std::string::npos ||
-                 pattern.find('#') != std::string::npos) &&
+            if (has_wildcard(pattern) &&
                 mqtt_topic_matches_wildcard(pattern, topic)) {
                 handler->handle(this->shared_from_this(), msg);
-                matched_wildcard = true;
+                handled = true;
             }
         }
 
-        if (!matched_wildcard) {
+        if (!handled) {
             spdlog::warn("[MqttClientAdapter] No route registered for: {}",
                          topic);
         }
@@ -457,6 +477,33 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
         routes_[normalized_topic] = std::move(handler);
         if (is_connected_ && client_) {
             try {
+                // 已被通配路由覆盖的主题不再向 broker 重复订阅
+                if (is_covered_by_wildcard(normalized_topic)) return;
+
+                // 新注册的通配路由若覆盖了已有精确路由，退订 broker
+                // 端的精确订阅，
+                // 消息改由通配订阅送达后本地统一分发（$share/$queue/$exclusive
+                // 等扩展订阅前缀的过滤名与业务主题不同，不在此处理）
+                if (has_wildcard(normalized_topic)) {
+                    std::vector<std::string> covered_exact;
+                    for (const auto& [pattern, h] : routes_) {
+                        if (pattern == normalized_topic) continue;
+                        if (has_wildcard(pattern)) continue;
+                        if (pattern.empty() || pattern.front() == '$') continue;
+                        if (mqtt_topic_matches_wildcard(normalized_topic,
+                                                        pattern)) {
+                            covered_exact.push_back(pattern);
+                        }
+                    }
+                    for (const auto& exact : covered_exact) {
+                        client_->unsubscribe(exact);
+                        spdlog::info(
+                            "[MqttClientAdapter] Unsubscribe exact topic {} "
+                            "covered by wildcard {}",
+                            exact, normalized_topic);
+                    }
+                }
+
                 client_->subscribe(topic, routes_[normalized_topic]->qos);
             } catch (...) {
             }
