@@ -287,13 +287,14 @@ class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
                 json j_err;
                 j_err["error"] = "Invalid JSON payload";
                 j_err["detail"] = ex.what();
-                send_response(session, http::status::bad_request, j_err.dump());
+                send_response(session, http::status::bad_request,
+                              safe_dump(j_err));
             } catch (const std::exception& ex) {
                 json j_err;
                 j_err["error"] = "Internal server error";
                 j_err["detail"] = ex.what();
                 send_response(session, http::status::internal_server_error,
-                              j_err.dump());
+                              safe_dump(j_err));
             } catch (...) {
                 send_response(session, http::status::internal_server_error,
                               "{\"error\":\"Unknown internal error\"}");
@@ -368,7 +369,7 @@ class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
                         j_err["error"] = err_msg;
                         self->send_response(session,
                                             http::status::internal_server_error,
-                                            j_err.dump());
+                                            safe_dump(j_err));
                     });
             } else {
                 std::move(fut)
@@ -387,7 +388,7 @@ class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
                         j_err["error"] = err_msg;
                         self->send_response(session,
                                             http::status::internal_server_error,
-                                            j_err.dump());
+                                            safe_dump(j_err));
                     });
             }
         }
@@ -396,12 +397,12 @@ class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
         void send_data_response(
             std::shared_ptr<HttpSession<WebAdapter>> session, const T& result) {
             if constexpr (std::is_same_v<std::decay_t<T>, nlohmann::json>) {
-                send_response(session, http::status::ok, result.dump());
+                send_response(session, http::status::ok, safe_dump(result));
             } else if constexpr (std::is_same_v<std::decay_t<T>, std::string>) {
                 send_response(session, http::status::ok, result);
             } else {
                 json j_res = result;
-                send_response(session, http::status::ok, j_res.dump());
+                send_response(session, http::status::ok, safe_dump(j_res));
             }
         }
 
@@ -603,7 +604,7 @@ class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
                     std::move(future_res)
                         .then([session, this](SpecificResult result) {
                             json j_res = result;
-                            auto data = j_res.dump();
+                            auto data = safe_dump(j_res);
 
                             session->send_http_response(http::status::ok, data,
                                                         "application/json");
@@ -632,7 +633,7 @@ class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
                             j_err["msg"] = err_msg;
                             // j_err["detail"] = detail;
                             // 3. 发送带具体错误信息的 HTTP响应
-                            auto data = j_err.dump();
+                            auto data = safe_dump(j_err);
                             session->send_http_response(http::status::ok, data);
                             this->log_result(data);
                         });
@@ -886,7 +887,7 @@ class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
                         }
                         nlohmann::json j_list = filenames;
                         session->send_http_response(http::status::ok,
-                                                    j_list.dump(),
+                                                    safe_dump(j_list),
                                                     "application/json");
                     } else {
                         std::string matched_path = "";

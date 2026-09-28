@@ -14,6 +14,14 @@ using json = nlohmann::json;
 
 namespace dk {
 
+// 序列化 JSON 的统一兜底:默认的 dump() 遇到非法 UTF-8 字节(例如 MAVLink
+// STATUSTEXT 被 50 字节截断的中文)会抛 json.exception.type_error.316,异常
+// 穿透 asio/io_context 线程会直接 terminate 掉整个进程。这里统一用 replace
+// 策略:非法字节替换为 U+FFFD,永不抛异常。
+inline std::string safe_dump(const nlohmann::json& j) {
+    return j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+}
+
 namespace meta_utils {
 
 template <typename T>

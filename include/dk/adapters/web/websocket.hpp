@@ -72,9 +72,17 @@ class WsSessionImpl : public WsConnection {
     void send(nlohmann::json msg_json) override {
         auto self = derived_from_this();
         net::post(ws_.get_executor(), [self, msg_json]() {
-            self->write_queue_.push_back(msg_json.dump());
-            if (!self->is_writing_) {
-                self->do_write();
+            // 兜底:此 lambda 运行在 io_context 线程上,任何逃逸的异常都会
+            // 穿透 run() 导致 std::terminate(历史上因非法 UTF-8 dump 崩溃过)
+            try {
+                self->write_queue_.push_back(safe_dump(msg_json));
+                if (!self->is_writing_) {
+                    self->do_write();
+                }
+            } catch (const std::exception& e) {
+                spdlog::error("[WsSessionImpl] send failed: {}", e.what());
+            } catch (...) {
+                spdlog::error("[WsSessionImpl] send failed: unknown error");
             }
         });
     }

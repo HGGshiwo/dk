@@ -59,7 +59,7 @@ class MqttRpcInvoker {
                 if (!payload.empty() && payload[0] == '{') {
                     nlohmann::json j_req = nlohmann::json::parse(payload);
                     j_req["msg_id"] = current_msg_id;
-                    payload = j_req.dump();
+                    payload = safe_dump(j_req);
                 }
             } catch (...) {
             }

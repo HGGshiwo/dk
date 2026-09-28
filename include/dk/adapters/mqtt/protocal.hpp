@@ -53,7 +53,7 @@ class IMqttSession {
                          const nlohmann::json& payload, uint8_t qos = 0,
                          bool retain = false,
                          const std::string& correlation_data = "") {
-        publish(topic, payload.dump(), qos, retain, correlation_data);
+        publish(topic, safe_dump(payload), qos, retain, correlation_data);
     }
 };
 
@@ -103,7 +103,7 @@ class IMqttClient : public IMqttSession {
                 try {
                     SpecificEvent event = j_event.template get<SpecificEvent>();
                     spdlog::info("[Mqtt] {} receive: {}", topic,
-                                 j_event.dump());
+                                 safe_dump(j_event));
                     business_handler(event);
                 } catch (const std::exception& ex) {
                     spdlog::error("[Mqtt] handler error: {}", ex.what());

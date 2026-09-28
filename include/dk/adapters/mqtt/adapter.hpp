@@ -458,7 +458,7 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
     void publish(const std::string& topic, const nlohmann::json& payload,
                  uint8_t qos = 0, bool retain = false,
                  const std::string& correlation_data = "") override {
-        std::string data = payload.dump();
+        std::string data = safe_dump(payload);
         do_send_publish(topic, data, qos, retain, "", correlation_data);
     }
 
@@ -466,7 +466,7 @@ class MqttClientAdapter : public dk::BaseAdapter<Context, DerivedEngine>,
         const std::string& topic, const nlohmann::json& req,
         uint32_t timeout_ms = 5000,
         const std::string& expect_resp_topic = "") override {
-        return rpc_invoker_.request(topic, req.dump(), timeout_ms,
+        return rpc_invoker_.request(topic, safe_dump(req), timeout_ms,
                                     expect_resp_topic);
     }
 
