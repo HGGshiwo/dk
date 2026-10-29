@@ -275,21 +275,26 @@ const WaypointEditor: React.FC<WaypointEditorProps> = ({
     if (mode === "follow" && followState.isFollowing && followState.startPoint) {
       if (followIntervalRef.current) clearInterval(followIntervalRef.current);
       followIntervalRef.current = setInterval(() => {
-        const origin = originRef.current;
-        if (!origin) return;
+        const ref = originRef.current;
+        // 跟随基准需要 (GPS, ENU) 基准对完整; pos_enu 未到前不下发
+        if (!ref || !ref.enuReady) return;
+        // 语义: 按下的落点(startPoint) = 目标位置; 拖动方向(startPoint->
+        // currentMousePoint) = 机头方向(yaw, NED 方位角)。
+        // 目标 GPS 用页面打开时记录的 (GPS, ENU) 基准对做纯相对换算,
+        // 与 pos_enu 坐标系原点无关。
         const direction = followState.currentMousePoint
           ? {
               dx: followState.currentMousePoint.x - followState.startPoint!.x,
               dy: followState.currentMousePoint.y - followState.startPoint!.y,
             }
           : { dx: 0, dy: 0 };
-        const deltaLon = direction.dx / METERS_PER_DEGREE_LON(origin.lat);
-        const deltaLat = direction.dy / METERS_PER_DEGREE_LAT;
-        const yaw = Math.atan2(deltaLon, deltaLat);
+        const de = followState.startPoint!.x - (ref.enuX as number);
+        const dn = followState.startPoint!.y - (ref.enuY as number);
+        const yaw = Math.atan2(direction.dx, direction.dy);
         const data = {
           pos: [
-            followState.startPoint!.x / METERS_PER_DEGREE_LON(origin.lat) + origin.lon,
-            followState.startPoint!.y / METERS_PER_DEGREE_LAT + origin.lat,
+            ref.lon + de / METERS_PER_DEGREE_LON(ref.lat),
+            ref.lat + dn / METERS_PER_DEGREE_LAT,
             followState.followHeight,
           ],
           yaw,
