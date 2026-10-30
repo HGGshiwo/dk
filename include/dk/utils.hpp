@@ -201,12 +201,15 @@ class ContextGuard {
 // （如 UDP 包），保证稳定的输出频率（如 0.2Hz => interval_ms=5000）。
 class TimeThrottle {
    private:
-    std::chrono::steady_clock::time_point last_{
-        std::chrono::steady_clock::time_point::min()};
+    std::chrono::steady_clock::time_point last_;
     std::chrono::milliseconds interval_;
 
    public:
-    explicit TimeThrottle(int interval_ms) : interval_(interval_ms) {}
+    explicit TimeThrottle(int interval_ms) : interval_(interval_ms) {
+        // 回退一个间隔，使首次调用立即放行；不能用 time_point::min()，
+        // 否则 now - last_ 在 int64 纳秒下溢出回绕，限流器永远不放行
+        last_ = std::chrono::steady_clock::now() - interval_;
+    }
 
     bool should_log() {
         auto now = std::chrono::steady_clock::now();
