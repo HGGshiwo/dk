@@ -1,5 +1,6 @@
 #pragma once
 #include <boost/smart_ptr/shared_ptr.hpp>
+#include <chrono>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -192,6 +193,28 @@ class ContextGuard {
     }
     ~ContextGuard() {
         if (exit_fn_) exit_fn_();
+    }
+};
+
+// 基于真实时间的日志限频器：距上次通过 >= interval_ms 才放行。
+// 与按调用次数计数的 Throttle 不同，适用于调用频率不固定的收发路径
+// （如 UDP 包），保证稳定的输出频率（如 0.2Hz => interval_ms=5000）。
+class TimeThrottle {
+   private:
+    std::chrono::steady_clock::time_point last_{
+        std::chrono::steady_clock::time_point::min()};
+    std::chrono::milliseconds interval_;
+
+   public:
+    explicit TimeThrottle(int interval_ms) : interval_(interval_ms) {}
+
+    bool should_log() {
+        auto now = std::chrono::steady_clock::now();
+        if (now - last_ >= interval_) {
+            last_ = now;
+            return true;
+        }
+        return false;
     }
 };
 

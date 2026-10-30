@@ -1,6 +1,7 @@
 #ifndef UDP_CLIENT_H
 #define UDP_CLIENT_H
 
+#include <cerrno>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -26,6 +27,14 @@ typedef int SOCKET;
 #define INVALID_SOCKET (SOCKET)(~0)
 #define SOCKET_ERROR (-1)
 #endif
+
+#include <spdlog/fmt/ranges.h>
+#include <spdlog/spdlog.h>
+
+#include "dk/utils.hpp"
+
+// 0.2Hz 限频：收发数据日志每 5 秒最多打印一条
+static constexpr int kUdpLogIntervalMs = 5000;
 
 class UdpClient {
    public:
@@ -91,12 +100,25 @@ class UdpClient {
         ssize_t sent_bytes =
             sendto(sockfd_, reinterpret_cast<const char*>(data), size, 0,
                    (const struct sockaddr*)&dest_addr_, sizeof(dest_addr_));
-        return sent_bytes;  // 返回实际发送的字节数，失败返回 -1 (SOCKET_ERROR)
+        if (sent_bytes < 0) {
+            if (err_throttle_.should_log()) {
+                spdlog::error(
+                    "[UdpClient] sendto failed: sent={}, size={}, "
+                    "errno={}",
+                    sent_bytes, size, errno);
+            }
+        } else if (tx_throttle_.should_log()) {
+            spdlog::info("[UDP TX] size={}, data: {:02X}", size,
+                         fmt::join(data, data + size, " "));
+        }
+        return sent_bytes;
     }
 
    private:
     SOCKET sockfd_;
     struct sockaddr_in dest_addr_;
+    dk::TimeThrottle tx_throttle_{kUdpLogIntervalMs};
+    dk::TimeThrottle err_throttle_{kUdpLogIntervalMs};
 };
 
 #endif  // UDP_CLIENT_H

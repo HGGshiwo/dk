@@ -1,5 +1,6 @@
 #pragma once
 
+#include <spdlog/fmt/ranges.h>
 #include <spdlog/spdlog.h>
 
 #include <boost/asio.hpp>
@@ -10,6 +11,7 @@
 #include <vector>
 
 #include "dk/adapters/base.hpp"
+#include "dk/utils.hpp"
 
 namespace net = boost::asio;
 using udp = net::ip::udp;
@@ -34,6 +36,10 @@ class UdpAdapter : public BaseAdapter<Context, DerivedEngine> {
     using EventHandler = std::function<void(const std::vector<uint8_t>&)>;
     std::map<RouteId, EventHandler> event_routes_;
 
+    TimeThrottle rx_throttle_{5000};       // 0.2Hz 收包内容日志
+    TimeThrottle err_throttle_{5000};      // 0.2Hz 错误日志
+    TimeThrottle unknown_throttle_{5000};  // 0.2Hz 未路由包日志
+
     void do_receive() {
         socket_.async_receive_from(
             net::buffer(recv_buffer_), sender_endpoint_,
@@ -55,14 +61,41 @@ class UdpAdapter : public BaseAdapter<Context, DerivedEngine> {
         std::vector<uint8_t> packet_data(recv_buffer_.begin(),
                                          recv_buffer_.begin() + bytes_recvd);
 
-        RouteId id = router_(packet_data);
-
-        if (auto it = context_routes_.find(id); it != context_routes_.end()) {
-            it->second(packet_data, this->engine_->get_context());
+        // 0.2Hz 限频打印收到的包内容（含未绑定路由的包）
+        if (rx_throttle_.should_log()) {
+            spdlog::info("[UDP RX] size={}, data: {:02X}", bytes_recvd,
+                         fmt::join(packet_data, " "));
         }
 
-        if (auto it = event_routes_.find(id); it != event_routes_.end()) {
-            it->second(packet_data);
+        try {
+            RouteId id = router_(packet_data);
+
+            if (auto it = context_routes_.find(id);
+                it != context_routes_.end()) {
+                it->second(packet_data, this->engine_->get_context());
+            }
+
+            if (auto it = event_routes_.find(id); it != event_routes_.end()) {
+                it->second(packet_data);
+            }
+
+            if (context_routes_.find(id) == context_routes_.end() &&
+                event_routes_.find(id) == event_routes_.end()) {
+                if (unknown_throttle_.should_log()) {
+                    spdlog::warn(
+                        "[UdpAdapter] no route matched, packet dropped "
+                        "(unknown cmd), size={}",
+                        bytes_recvd);
+                }
+            }
+        } catch (const std::exception& e) {
+            // 坏包（如短于包头）不能让异常穿透 io_context 线程终止进程
+            if (err_throttle_.should_log()) {
+                spdlog::error(
+                    "[UdpAdapter] packet handling failed: size={}, "
+                    "what={}",
+                    bytes_recvd, e.what());
+            }
         }
     }
 
