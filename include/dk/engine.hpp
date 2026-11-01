@@ -115,8 +115,9 @@ struct StepLevelGuard {
 
 // Engine的抽象接口，不需要Engine的真实类型
 template <typename Context, size_t MaxDepth = 10, size_t MemorySize = 65536>
-class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context>,
-                    public TimeTracker {
+class IEngine : public IAsyncRuntime,
+                public IStatePathBuilder<Context>,
+                public TimeTracker {
    private:
     struct StateNode {
         IState<Context>* state = nullptr;
@@ -352,6 +353,8 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context>,
             // step_call_level_ = 0;
             std::cout << "[Engine]: transition error: " << e.what()
                       << std::endl;
+        } catch (...) {
+            std::cout << "[Engine]: transition unknown error" << std::endl;
         }
     }
 
@@ -414,7 +417,19 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context>,
     }
 
     // 专门用于安全分发 Tick 的函数
+    // 【回调异常兜底】tick 回调抛异常只损失本拍，不冲出 io_context::run()
     void process_tick(double dt) {
+        try {
+            process_tick_impl(dt);
+        } catch (const std::exception& ex) {
+            std::cout << "[Engine]: process_tick error: " << ex.what()
+                      << std::endl;
+        } catch (...) {
+            std::cout << "[Engine]: process_tick unknown error" << std::endl;
+        }
+    }
+
+    void process_tick_impl(double dt) {
         StateAction<Context> final_transition =
             StateAction<Context>::unhandled();
         {
@@ -423,8 +438,7 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context>,
 
             // 0. 先派发 Tick 到引擎自身
             this->internal_tick(dt);
-            if (this->pending_transition_.has_value())
-                return;
+            if (this->pending_transition_.has_value()) return;
 
             // 1. 优先派发 Tick 给全局无状态监听器
             for (auto& listener : this->listeners_) {
@@ -472,7 +486,7 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context>,
     ~IEngine() { stop(); };
 
     // 启动前的回调
-    virtual void on_start(){};
+    virtual void on_start() {};
 
     // 启动后的周期回调
     virtual void on_tick(double dt, Context& ctx) {}
@@ -513,10 +527,17 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context>,
     // 线程安全的外部事件注入接口
     template <typename Event>
     void dispatch(Event e) {
-        boost::asio::post(io_context_,
-                          [this, ev = EventBox(std::move(e))]() mutable {
-                              this->process_internal(ev);
-                          });
+        boost::asio::post(io_context_, [this,
+                                        ev = EventBox(std::move(e))]() mutable {
+            try {
+                this->process_internal(ev);
+            } catch (const std::exception& ex) {
+                std::cout << "[Engine]: dispatch error: " << ex.what()
+                          << std::endl;
+            } catch (...) {
+                std::cout << "[Engine]: dispatch unknown error" << std::endl;
+            }
+        });
     }
 
     template <typename StateType, typename... Args>
@@ -1003,16 +1024,16 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context>,
         schedule_next_tick();
 
         if constexpr (std::is_same_v<RootState, void>) {
-            boost::asio::post(
-                io_context_, [this]() {
-                    event_thread_id_ = std::this_thread::get_id();
-                });
+            boost::asio::post(io_context_, [this]() {
+                event_thread_id_ = std::this_thread::get_id();
+            });
         } else {
             // 派发初始状态跳转（放入 io_context 队列）
             boost::asio::post(
-                io_context_, [this, args = std::make_tuple(
-                                        std::forward<Args>(args)...)]() mutable {
-                    // 真正开始处理事件时，记录执行该任务的线程ID作为 event_thread_id_
+                io_context_, [this, args = std::make_tuple(std::forward<Args>(
+                                        args)...)]() mutable {
+                    // 真正开始处理事件时，记录执行该任务的线程ID作为
+                    // event_thread_id_
                     event_thread_id_ = std::this_thread::get_id();
                     std::apply(
                         [this](auto&&... unpacked_args) {
@@ -1060,7 +1081,15 @@ class IEngine : public IAsyncRuntime, public IStatePathBuilder<Context>,
         // asio::defer 告诉
         // Asio：这是一个后续任务，请优先在当前调用栈结束后执行！
         boost::asio::defer(io_context_, [this, e = std::move(e)]() mutable {
-            this->process_internal(e);
+            try {
+                this->process_internal(e);
+            } catch (const std::exception& ex) {
+                std::cout << "[Engine]: dispatch_internal error: " << ex.what()
+                          << std::endl;
+            } catch (...) {
+                std::cout << "[Engine]: dispatch_internal unknown error"
+                          << std::endl;
+            }
         });
     }
 };
@@ -1072,7 +1101,23 @@ class BaseEngine
       public std::enable_shared_from_this<DerivedEngine> {
    private:
     // 使用子类类型作为模板参数，因为用到handle_event
+    //
+    // 【回调异常兜底】任何监听器/状态/计划回调抛出的异常都在本入口被拦截，
+    // 只终结当前事件的处理，绝不允许冲出 io_context::run() 打崩进程
+    // （历史上 listener 抛 out_of_range 曾导致整个进程 abort）
     void process_internal(const EventBox& e) {
+        try {
+            process_internal_impl(e);
+        } catch (const std::exception& ex) {
+            std::cout << "[Engine]: process_internal error: " << ex.what()
+                      << std::endl;
+        } catch (...) {
+            std::cout << "[Engine]: process_internal unknown error"
+                      << std::endl;
+        }
+    }
+
+    void process_internal_impl(const EventBox& e) {
         // 开启事件处理周期的统一防护
         std::optional<StateAction<Context>> final_transition;
         {
@@ -1083,7 +1128,19 @@ class BaseEngine
                  it != this->active_waits_.end();) {
                 if (it->second->promise->state() != PromiseState::PENDING) {
                     it = this->active_waits_.erase(it);
-                } else if (it->second->predicate(e)) {
+                    continue;
+                }
+                bool matched = false;
+                try {
+                    matched = it->second->predicate(e);
+                } catch (const std::exception& ex) {
+                    std::cout << "[Engine]: wait predicate error: " << ex.what()
+                              << std::endl;
+                } catch (...) {
+                    std::cout << "[Engine]: wait predicate unknown error"
+                              << std::endl;
+                }
+                if (matched) {
                     to_resolve.push_back(it->second->promise);
                     it = this->active_waits_.erase(it);
                 } else {
@@ -1224,8 +1281,18 @@ class BaseEngine
             future = future.timeout(timeout_ms);
         }
         boost::asio::post(
-            this->io_context_,
-            [this, e = std::move(e)]() mutable { this->process_internal(e); });
+            this->io_context_, [this, e = std::move(e)]() mutable {
+                try {
+                    this->process_internal(e);
+                } catch (...) {
+                    std::cout << "[Engine]: dispatch_async process error"
+                              << std::endl;
+                    // 异常时立即拒绝 promise，让调用方拿到错误而不是等超时
+                    if (!e.is_settled()) {
+                        e.reject(std::current_exception());
+                    }
+                }
+            });
 
         return future;
     }

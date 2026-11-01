@@ -1,9 +1,12 @@
 #pragma once
 #include <boost/beast/http/file_body.hpp>
 #include <boost/filesystem.hpp>
+#include <cerrno>
+#include <cstdlib>
 #include <fstream>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <set>
 #include <tuple>
 #include <type_traits>
@@ -117,6 +120,24 @@ inline nlohmann::json parse_query_to_json(boost::beast::string_view target) {
         start = ampersand + 1;
     }
     return j;
+}
+
+// 部分客户端会把 msg_id 发成数字字符串（如 "42"），这里做宽松解析：
+// 严格转换失败时返回 nullopt，由调用方决定兜底行为
+inline std::optional<uint64_t> try_extract_msg_id(const nlohmann::json& val) {
+    if (val.is_number()) {
+        return val.get<uint64_t>();
+    }
+    if (val.is_string()) {
+        const std::string s = val.get<std::string>();
+        char* end = nullptr;
+        errno = 0;
+        unsigned long long parsed = std::strtoull(s.c_str(), &end, 10);
+        if (!s.empty() && end != nullptr && *end == '\0' && errno != ERANGE) {
+            return static_cast<uint64_t>(parsed);
+        }
+    }
+    return std::nullopt;
 }
 
 template <typename T, typename = void>
@@ -721,9 +742,14 @@ class WebAdapter : public BaseAdapter<Context, DerivedEngine> {
                 auto json_data = json::parse(msg);
                 // Intercept ACK messages automatically
                 if (json_data.contains("msg_id")) {
-                    uint64_t acked_id = json_data["msg_id"].get<uint64_t>();
-                    conn->handle_ack(acked_id);
-                    return;  // If it's pure ACK, we can stop processing here
+                    auto acked_id = try_extract_msg_id(json_data["msg_id"]);
+                    if (acked_id) {
+                        conn->handle_ack(*acked_id);
+                        return;  // If it's pure ACK, stop processing here
+                    }
+                    // msg_id 非数字时记录片段帮助定位发送方，消息继续走业务逻辑
+                    spdlog::warn("[Websocket] msg_id is not a number, msg: {}",
+                                 msg.substr(0, MAX_LOG_LENGTH));
                 }
             } catch (const std::exception& ex) {
                 spdlog::error("[Websocket] Receive Error: {}", ex.what());
